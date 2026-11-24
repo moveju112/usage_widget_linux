@@ -1,0 +1,16 @@
+[package]
+name = "ai-usage-tray"
+version = "1.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+libc = "0.2"
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true

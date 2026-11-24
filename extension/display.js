@@ -1,0 +1,54 @@
+const statuses = {
+    loading: '조회 중', waiting: '첫 Claude Code 응답 대기', unavailable: '한도 정보 미제공',
+    login: '로그인 필요', missing: 'CLI 미설치', timeout: '조회 시간 초과', error: '조회 실패',
+};
+
+export function duration(minutes) {
+    if (minutes === 10080) return '주간';
+    if (minutes % 1440 === 0) return String(minutes / 1440) + '일';
+    if (minutes % 60 === 0) return String(minutes / 60) + '시간';
+    return String(minutes) + '분';
+}
+
+export function percent(value) {
+    if (value === 0) return '0%';
+    if (value > 0 && value < 0.1) return '<0.1%';
+    return String(Math.round(value * 10) / 10) + '%';
+}
+
+export function present(data, now, service) {
+    const state = data ?? {status: 'loading', windows: []};
+    const windows = (state.windows ?? []).map(w => ({
+        ...w, expired: w.resets != null && w.resets <= now,
+    }));
+    const valid = windows.filter(w => !w.expired);
+    const main = valid.find(w => w.minutes === 300) ?? valid.find(w => w.minutes === 10080) ?? valid[0];
+    const stale = Boolean(state.received && now - state.received >= 1800 && valid.length);
+    let status = statuses[state.status] ?? '정상';
+    if (state.status === 'ok') {
+        if (!valid.length) status = windows.length ? '초기화 후 새 값 대기' : '한도 정보 미제공';
+        else if (stale) status = '오래된 기록';
+    }
+    let value = '—';
+    if (main) {
+        const qualifier = main.minutes === 300 ? '' : duration(main.minutes) + ' ';
+        value = qualifier + percent(main.percent) + (stale ? '*' : '');
+    }
+    return {name: service, windows, main, value, status, stale, received: state.received,
+        source: state.source, normal: status === '정상'};
+}
+
+export const panelStyles = {inline: '1안 · 한 줄형', stacked: '2안 · 두 줄형', rings: '3안 · 이중 링형'};
+export const detailStyles = {auto: '패널 방식에 맞춤', list: '목록형', meters: '막대형', columns: '나란히 비교'};
+export const panelPeriods = [300, 10080];
+
+export function periodLabel(minutes) {
+    return minutes === 10080 ? '7일' : duration(minutes);
+}
+
+export function reading(view, minutes) {
+    const w = view.windows.find(row => row.minutes === minutes);
+    const value = w && !w.expired ? w.percent : null;
+    const text = value === null ? '—' : percent(value) + (view.stale ? '*' : '');
+    return {value, text, resets: w?.resets, expired: w?.expired ?? false};
+}

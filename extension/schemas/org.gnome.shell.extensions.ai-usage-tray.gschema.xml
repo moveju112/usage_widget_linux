@@ -1,0 +1,22 @@
+<schemalist>
+  <schema id="org.gnome.shell.extensions.ai-usage-tray" path="/org/gnome/shell/extensions/ai-usage-tray/">
+    <key name="panel-style" type="s">
+      <choices><choice value="inline"/><choice value="stacked"/><choice value="rings"/></choices>
+      <default>'rings'</default>
+      <summary>패널의 서비스 아이콘과 5시간·7일 사용량 표시 방식</summary>
+    </key>
+    <key name="layout" type="s">
+      <choices><choice value="auto"/><choice value="list"/><choice value="meters"/><choice value="columns"/></choices>
+      <default>'auto'</default>
+      <summary>상세 메뉴 표시 방식</summary>
+    </key>
+    <key name="auto-update" type="b">
+      <default>true</default>
+      <summary>확인한 새 안정 릴리스를 자동으로 설치</summary>
+    </key>
+    <key name="last-update-check" type="x">
+      <default>0</default>
+      <summary>마지막 프로그램 업데이트 확인 시각</summary>
+    </key>
+  </schema>
+</schemalist>

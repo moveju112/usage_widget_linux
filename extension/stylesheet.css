@@ -1,0 +1,35 @@
+.aut-panel { spacing: 5px; }
+.aut-vertical { font-size: 0.82em; text-align: center; }
+.aut-content { padding: 8px 12px; }
+.aut-sections { spacing: 10px; }
+.aut-columns { spacing: 12px; }
+.aut-section { spacing: 4px; }
+.aut-heading { spacing: 14px; padding-bottom: 5px; }
+.aut-name { font-size: 1.15em; font-weight: bold; }
+.aut-row { spacing: 7px; }
+.aut-period { min-width: 3.3em; }
+.aut-number { min-width: 3.6em; font-weight: bold; text-align: right; }
+.aut-large { font-size: 1.75em; font-weight: bold; }
+.aut-meta, .aut-dim { font-size: 0.9em; }
+.aut-received { padding-top: 5px; }
+.aut-state { font-weight: bold; font-size: 0.92em; }
+.aut-rule, .aut-vrule { background-color: rgba(128,128,128,0.35); }
+.aut-rule { height: 1px; }
+.aut-vrule { width: 1px; }
+.aut-track { height: 4px; border-radius: 2px; background-color: rgba(128,128,128,0.5); }
+.aut-notice { padding-top: 8px; }
+.aut-fill-claude { background-color: #dc9476; border-radius: 2px; }
+.aut-fill-codex { background-color: #75b4b1; border-radius: 2px; }
+
+.aut-panel, .aut-service { spacing: 6px; }
+.aut-pairs { spacing: 8px; }
+.aut-pair, .aut-period-title { spacing: 3px; }
+.aut-period-title, .aut-small { font-size: 0.85em; }
+.aut-amount, .aut-cell-value { font-weight: bold; }
+.aut-cell-value { font-size: 1.3em; }
+.aut-separator { width: 1px; height: 14px; background-color: rgba(160,160,160,0.45); }
+.aut-brand-claude { color: #df916c; }
+.aut-brand-codex { color: #adc9ea; }
+.aut-stale-clock { color: white; background-color: #3b3b40; border-radius: 10px; }
+.aut-table .aut-service, .aut-table .aut-cell, .aut-table .aut-period-title { padding: 4px 9px; }
+.aut-cell { spacing: 2px; }

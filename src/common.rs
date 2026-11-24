@@ -62,6 +62,10 @@ pub fn window(minutes: &Value, percent: &Value, reset: &Value) -> Option<Value> 
     }
     Some(json!({"minutes":duration as u64,"percent":percent,"resets":timestamp(reset)}))
 }
+pub fn exhausted(window: &Value) -> bool {
+    window["percent"].as_f64() == Some(100.0)
+        && window["resets"].as_f64().is_none_or(|reset| reset > now())
+}
 pub fn snapshot(source: &str, windows: Vec<Value>, received: Option<f64>, status: &str) -> Value {
     json!({"source":source,"windows":windows,"received":received,"status":status})
 }

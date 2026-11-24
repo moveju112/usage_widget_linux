@@ -1,21 +1,26 @@
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
-import GObject from 'gi://GObject';
 import GLib from 'gi://GLib';
 import St from 'gi://St';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
-import {detailStyles, panelPeriods, panelStyles, periodLabel, present, reading} from './display.js';
+import {panelPeriods, periodLabel, present, reading} from './display.js';
 import {box, label, localTime, panelService, usageTable} from './usageView.js';
 
-import {UpdateMenu} from './updates.js';
+import {Updates} from './updates.js';
+import {actionPath, textState} from './settings.js';
 
 const names = [['claude', 'Claude'], ['codex', 'Codex']];
 
 function spacer() {
     return new St.Widget({x_expand: true});
+}
+function menuButton(name, icon) {
+    return new St.Button({style_class: 'icon-button flat', accessible_name: name,
+        can_focus: true, track_hover: true,
+        child: new St.Icon({icon_name: icon, icon_size: 18})});
 }
 function meter(fraction, key) {
     const width = 85;
@@ -46,28 +51,40 @@ export default class AIUsageTray extends Extension {
         this._content = new PopupMenu.PopupMenuSection();
         this._content.actor.add_style_class_name('aut-content');
         this._button.menu.addMenuItem(this._content);
+        const header = box(false, 'aut-heading');
+        header.add_child(label('사용 한도', 'aut-name'));
+        header.add_child(spacer());
+        const buttons = box(false, 'aut-menu-actions');
+        const refreshButton = menuButton('사용량 새로고침', 'view-refresh-symbolic');
+        refreshButton.connect('clicked', () => this._actions.activate_action('refresh', null));
+        buttons.add_child(refreshButton);
+        const gear = menuButton('트레이 설정', 'emblem-system-symbolic');
+        gear.connect('clicked', () => {
+            this._button.menu.close();
+            const settings = global.get_window_actors().map(actor => actor.meta_window)
+                .find(w => w.get_title() === '트레이 설정' && w.get_wm_class() === 'org.gnome.Shell.Extensions');
+            if (settings) Main.activateWindow(settings);
+            else this.openPreferences();
+        });
+        buttons.add_child(gear);
+        header.add_child(buttons);
+        this._content.actor.add_child(header);
         this._legend = label('바깥 5시간  ·  안쪽 7일  ·  점선 값 없음', 'aut-meta aut-received');
         this._content.actor.add_child(this._legend);
         this._notice = label('', 'aut-notice');
         this._content.actor.add_child(this._notice);
-        this._button.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        const refresh = new PopupMenu.PopupImageMenuItem('새로고침', 'view-refresh-symbolic');
-        refresh.connect('activate', () => {
-            GObject.signal_stop_emission_by_name(refresh, 'activate');
-            this._refresh();
-        });
-        this._button.menu.addMenuItem(refresh);
-        this._choices = {};
-        for (const [setting, title, styles] of [
-            ['panel-style', '표시 방식', panelStyles], ['layout', '상세 메뉴 모양', detailStyles],
-        ]) {
-            const submenu = new PopupMenu.PopupSubMenuMenuItem(title);
-            this._button.menu.addMenuItem(submenu);
-            this._choices[setting] = Object.entries(styles).map(([key, name]) => [key,
-                submenu.menu.addAction(name, () => this._settings.set_string(setting, key))]);
+        this._updates = new Updates(this._settings, this.path + '/ai-usage-tray', this.metadata['version-name']);
+        this._actions = new Gio.SimpleActionGroup();
+        this._actions.add_action(this._updates.action);
+        const refresh = Gio.SimpleAction.new_stateful('refresh', null, textState(''));
+        refresh.connect('activate', () => this._refresh());
+        this._actions.add_action(refresh);
+        for (const [key] of names) {
+            const status = Gio.SimpleAction.new_stateful(key, null, textState('예약 상태 확인 중'));
+            status.set_enabled(false);
+            this._actions.add_action(status);
         }
-        this._updates = new UpdateMenu(this._button.menu, this._settings,
-            this.path + '/ai-usage-tray', this.metadata['version-name']);
+        this._exportId = Gio.DBus.session.export_action_group(actionPath, this._actions);
         this._settingsChanged = this._settings.connect('changed', () => this._render(true));
         this._button.menu.connect('open-state-changed', (_menu, open) => {
             if (open) this._render(true);
@@ -166,7 +183,7 @@ export default class AIUsageTray extends Extension {
         const narrow = monitor && monitor.width / scale < 530;
         const cross = vertical ? this._button.width : this._button.height;
         const thickness = Math.round((cross > 0 ? cross : Main.panel.height || 32 * scale) / scale);
-        const signature = JSON.stringify([views, this._state.notice, mode, layout, vertical, thickness, narrow,
+        const signature = JSON.stringify([views, this._state.notice, this._state.schedule, this._state.claudeSchedule, mode, layout, vertical, thickness, narrow,
             GLib.DateTime.new_now_local().format('%F %z')]);
         if (!force && signature === this._previous) return;
         this._previous = signature;
@@ -193,15 +210,30 @@ export default class AIUsageTray extends Extension {
                 this._body.add_child(this._section(view, names[i][0], layout, columns, narrow));
             }
         }
-        this._content.actor.insert_child_at_index(this._body, 0);
+        this._content.actor.insert_child_at_index(this._body, 1);
         this._legend.visible = mode === 'rings';
+        const statuses = {off: '꺼짐', running: '호출 중', consent_required: '일시 중지 · 예약 설정에서 약관 안내에 동의해.',
+            error: '예약 설정이나 기록을 읽을 수 없어.'};
+        for (const [key, name] of names) {
+            const schedule = this._state[key === 'claude' ? 'claudeSchedule' : 'schedule'];
+            const step = entry => entry?.total > 1 ? ' · ' + entry.ordinal + '/' + entry.total + '회' : '';
+            let description = schedule?.next
+                ? '다음 ' + localTime(schedule.next, schedule.total > 1) + step(schedule) + ' · ' + schedule.model
+                : statuses[schedule?.status] ?? (schedule ? '다음 예약 확인 중' : '예약 상태 확인 중');
+            const last = schedule?.last;
+            if (last) {
+                const result = {ok: '성공', error: '실패', missing: name + ' CLI 미설치', timeout: '응답 미확인',
+                    login: name === 'Claude' ? 'Claude 계정 로그인 필요' : 'ChatGPT 로그인 필요',
+                    no_model: name === 'Claude' ? '사용 가능한 Haiku 없음' : '사용 가능한 Luna 없음',
+                    limited: '한도 소진', changed: '예약 변경', expired: '시간대 지남', unconfirmed: '결과 미확인'};
+                description += '\n최근 ' + localTime(last.time, last.total > 1) + step(last) + ' · ' + last.model + ' · ' +
+                    (schedule.status === 'running' ? '호출 중' : result[last.status] ?? '실패');
+            }
+            this._actions.lookup_action(key).set_state(textState(description));
+        }
         this._notice.text = this._state.notice ?? '';
         this._notice.visible = Boolean(this._state.notice);
-        for (const [setting, items] of Object.entries(this._choices)) {
-            const selected = this._settings.get_string(setting);
-            for (const [key, item] of items)
-                item.setOrnament(key === selected ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE);
-        }
+        this._actions.lookup_action('refresh').set_state(textState(this._notice.text));
     }
 
     _section(view, key, layout, columns, narrow) {
@@ -233,11 +265,12 @@ export default class AIUsageTray extends Extension {
         if (this._retry) GLib.source_remove(this._retry);
         this._ticker = this._retry = 0;
         this._stopWorker();
+        Gio.DBus.session.unexport_action_group(this._exportId);
         this._updates.destroy();
-        this._updates = null;
+        this._updates = this._actions = null;
         this._settings.disconnect(this._settingsChanged);
         this._button?.destroy();
-        this._button = this._body = this._choices = this._settings = this._state = null;
+        this._button = this._body = this._settings = this._state = null;
         this._strip = this._legend = this._icons = this._notice = this._content = null;
     }
 }

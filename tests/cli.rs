@@ -279,15 +279,24 @@ fn slow_query_and_manual_refresh() {
             }
         }
     });
-    let receive = || rx.recv_timeout(Duration::from_secs(4)).unwrap();
-    assert_eq!(receive()["codex"]["status"], "loading");
+    let receive = |ready: fn(&Value) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            let state = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if ready(&state) {
+                return state;
+            }
+        }
+    };
+    assert_eq!(receive(|_| true)["codex"]["status"], "loading");
     u.capture(br#"{"rate_limits":{"five_hour":{"used_percentage":0}}}"#);
     pipe.write_all(b"refresh\n").unwrap();
-    let first = receive();
-    assert_eq!(first["claude"]["windows"][0]["percent"], 0);
+    let first = receive(|state| state["claude"]["windows"][0]["percent"] == 0);
+    assert_eq!(first["codex"]["status"], "loading", "{first}");
     pipe.write_all(b"refresh\n").unwrap();
-    let second = receive();
-    assert_eq!(second["notice"], "다음 Claude Code 응답 대기");
+    let second = receive(|state| state["notice"] == "다음 Claude Code 응답 대기");
     assert_eq!(first["claude"]["received"], second["claude"]["received"]);
     let start = Instant::now();
     drop(pipe);
@@ -416,6 +425,42 @@ fn github_release_update_and_recovery() {
     assert_eq!(fs::read(u.cfg()).unwrap(), settings);
     assert_eq!(fs::read(u.dest().join("cli-paths.json")).unwrap(), hints);
     assert_eq!(status("update")["state"], "current");
+    let mut legacy_release = release.clone();
+    legacy_release["tag_name"] = "v1.1.0".into();
+    legacy_release["assets"] = json!([]);
+    publish(&legacy_release);
+    for action in ["check-update", "update"] {
+        assert_eq!(
+            status(action),
+            json!({"state":"unpublished", "version":version})
+        );
+    }
+    assert_eq!(load(&metadata)["version-name"], version);
+
+    let next_minor = env!("CARGO_PKG_VERSION_MINOR").parse::<u64>().unwrap() + 1;
+    let next = format!("{}.{next_minor}.0", env!("CARGO_PKG_VERSION_MAJOR"));
+    let mut next_release = release.clone();
+    next_release["tag_name"] = format!("v{next}").into();
+    next_release["assets"][0]["browser_download_url"] = format!(
+        "https://github.com/moveju112/usage_widget_linux/releases/download/v{next}/{asset_name}"
+    )
+    .into();
+    publish(&next_release);
+    assert_eq!(
+        status("check-update"),
+        json!({"state":"available", "version":next})
+    );
+
+    publish(&release);
+    let mut legacy_installed = load(&metadata);
+    legacy_installed["version-name"] = "1.1.0".into();
+    legacy_installed["version"] = 3.into();
+    fs::write(&metadata, legacy_installed.to_string()).unwrap();
+    assert_eq!(
+        status("update"),
+        json!({"state":"installed", "version":version})
+    );
+    assert_eq!(load(&metadata)["version-name"], version);
     let mut newer_installed = load(&metadata);
     newer_installed["version-name"] = "20.0.0".into();
     fs::write(&metadata, newer_installed.to_string()).unwrap();
@@ -436,4 +481,541 @@ fn github_release_update_and_recovery() {
             .success()
     );
     assert!(!u.dest().exists());
+}
+
+// A disposable app-server reports a ChatGPT account and records only turn/start.
+const SCHEDULE_SERVER: &str = r#"
+while IFS= read -r message; do
+    case "$message" in
+        *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+        *'"method":"account/read"'*)
+            account=chatgpt
+            if test "$SCENARIO" = api; then account=apiKey; fi
+            echo "{\"id\":2,\"result\":{\"account\":{\"type\":\"$account\"}}}" ;;
+        *'"method":"account/rateLimits/read"'*)
+            id=2
+            case "$message" in *'"id":5'*) id=5 ;; esac
+            used=5
+            if test "$SCENARIO" = limited; then used=100; fi
+            echo "{\"id\":$id,\"result\":{\"rateLimits\":{\"secondary\":{\"usedPercent\":$used,\"windowDurationMins\":10080,\"resetsAt\":2200000000}}}}" ;;
+        *'"method":"model/list"'*)
+            if test "$SCENARIO" = no_model; then echo '{"id":6,"result":{"data":[]}}'
+            elif test "$SCENARIO" != series; then exit 3
+            else
+                case "$message" in
+                    *'"cursor":"page2"'*) echo '{"id":6,"result":{"data":[{"model":"gpt-5.10-luna"},{"model":"gpt-9-luna","hidden":true}]}}' ;;
+                    *) echo '{"id":6,"result":{"data":[{"model":"gpt-5.9-luna"},{"model":"gpt-10-sol"}],"nextCursor":"page2"}}' ;;
+                esac
+            fi ;;
+        *'"method":"thread/start"'*)
+            case "$message" in *'"ephemeral":true'*) ;; *) exit 2 ;; esac
+            case "$message" in *'"sandbox":"read-only"'*) ;; *) exit 2 ;; esac
+            model=chosen-model
+            if test "$SCENARIO" = series; then model=gpt-5.10-luna; fi
+            case "$message" in *"\"model\":\"$model\""*) ;; *) exit 2 ;; esac
+            if test "$SCENARIO" = changed; then
+                echo '{"enabled":false}' > "$HOME/.config/ai-usage-tray/schedule.json"
+            fi
+            echo "{\"id\":3,\"result\":{\"thread\":{\"id\":\"thread\"},\"model\":\"$model\",\"modelProvider\":\"openai\"}}" ;;
+        *'"method":"turn/start"'*)
+            echo sent >> "$HOME/attempts"
+            echo '{"id":4,"result":{"turn":{"id":"turn"}}}'
+            status=completed
+            if test "$SCENARIO" = failure; then status=failed; fi
+            echo "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread\",\"turn\":{\"id\":\"turn\",\"status\":\"$status\"}}}" ;;
+    esac
+done
+"#;
+
+fn scheduled_user(start: &str, end: &str) -> (User, String) {
+    use chrono::{DateTime, Timelike, Utc};
+    use sha2::{Digest, Sha256};
+    let u = User::new();
+    u.fake("codex", SCHEDULE_SERVER);
+    let time: DateTime<Utc> = SystemTime::now().into();
+    // Choose a timezone in which the test always starts around noon.
+    let tz = format!("UTC{}", time.hour() as i32 - 12);
+    let date = time.date_naive();
+    let seed = (0u32..)
+        .find(|n| {
+            let hash = Sha256::digest(format!("{n}:{date}"));
+            u64::from_be_bytes(hash[..8].try_into().unwrap()) % 1440 < 600
+        })
+        .unwrap()
+        .to_string();
+    let dir = u.path("home/.config/ai-usage-tray");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("schedule.json"),
+        serde_json::to_vec(&json!({
+            "enabled":true,"start":start,"end":end,"seed":seed,"model":"chosen-model"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    (u, tz)
+}
+fn scheduled_worker(
+    u: &User,
+    tz: &str,
+    scenario: &str,
+) -> (std::process::Child, mpsc::Receiver<Value>) {
+    let installed = u.dest().join("ai-usage-tray");
+    let mut child = u
+        .command(if installed.exists() {
+            &installed
+        } else {
+            Path::new(BIN)
+        })
+        .arg("serve")
+        .env("TZ", tz)
+        .env("SCENARIO", scenario)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = child.stdout.take().unwrap();
+    let (send, recv) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(output).lines().map_while(Result::ok) {
+            if send.send(serde_json::from_str(&line).unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    (child, recv)
+}
+fn wait_schedule(
+    recv: &mpsc::Receiver<Value>,
+    key: &str,
+    predicate: impl Fn(&Value) -> bool,
+) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let state = recv
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
+        if predicate(&state[key]) {
+            return state[key].clone();
+        }
+    }
+}
+#[test]
+fn schedule_claim_survives_races_failures_and_restarts() {
+    for (scenario, expected, turns) in [
+        ("success", "ok", 1),
+        ("failure", "error", 1),
+        ("limited", "limited", 0),
+        ("api", "login", 0),
+        ("changed", "changed", 0),
+    ] {
+        let (u, tz) = scheduled_user("00:00", "23:59");
+        let (mut first, rx) = scheduled_worker(&u, &tz, scenario);
+        let (mut other, rx2) = scheduled_worker(&u, &tz, scenario);
+        // Either process can win the lock. A changed config is also observed as off.
+        if scenario == "changed" {
+            let until = Instant::now() + Duration::from_secs(5);
+            let record = u.path("home/.local/state/ai-usage-tray/scheduled-call.json");
+            while json_record_status(&record).as_deref() != Some(expected) {
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(20));
+            }
+        } else {
+            wait_schedule(&rx, "schedule", |s| s["last"]["status"] == expected);
+            wait_schedule(&rx2, "schedule", |s| s["last"]["status"] == expected);
+        }
+        first.stdin.take();
+        other.stdin.take();
+        assert!(first.wait().unwrap().success() && other.wait().unwrap().success());
+        if scenario != "changed" {
+            let (mut again, rx) = scheduled_worker(&u, &tz, scenario);
+            wait_schedule(&rx, "schedule", |s| {
+                s["last"]["status"] == expected
+                    && s["next"]
+                        .as_f64()
+                        .is_some_and(|t| t > s["last"]["time"].as_f64().unwrap())
+            });
+            again.stdin.take();
+            assert!(again.wait().unwrap().success());
+        }
+        assert_eq!(
+            fs::read_to_string(u.path("home/attempts"))
+                .unwrap_or_default()
+                .lines()
+                .count(),
+            turns
+        );
+    }
+}
+fn json_record_status(path: &Path) -> Option<String> {
+    serde_json::from_slice::<Value>(&fs::read(path).ok()?).ok()?["status"]
+        .as_str()
+        .map(str::to_owned)
+}
+#[test]
+fn missed_window_and_unreadable_record_do_not_send() {
+    let (u, tz) = scheduled_user("03:10", "03:10");
+    let (mut child, rx) = scheduled_worker(&u, &tz, "success");
+    let state = wait_schedule(&rx, "schedule", |s| s["next"].is_number());
+    assert!(
+        state["next"].as_u64().unwrap()
+            > SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+    );
+    let dir = u.path("home/.local/state/ai-usage-tray");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("scheduled-call.json"), b"null").unwrap();
+    wait_schedule(&rx, "schedule", |s| s["status"] == "error");
+    child.stdin.take();
+    assert!(child.wait().unwrap().success());
+    assert!(!u.path("home/attempts").exists());
+}
+
+const SCHEDULE_CLAUDE: &str = r#"
+test -z "$CLAUDE_CONFIG_DIR" || exit 10
+case " $* " in
+    *' auth status --json '*)
+        if test "$SCENARIO" = claude_key; then
+            echo '{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}'
+        else
+            echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'
+        fi
+        if test "$SCENARIO" = claude_changed; then
+            echo '{"enabled":false}' > "$HOME/.config/ai-usage-tray/claude-schedule.json"
+        fi
+        ;;
+    *' --input-format stream-json '*)
+        IFS= read -r request
+        case "$request" in *'"subtype":"initialize"'*) ;; *) exit 11;; esac
+        models='[{"value":"haiku","displayName":"Haiku 5.9"},{"value":"claude-haiku-5-10","displayName":"Haiku 5.10"},{"value":"claude-sonnet-9","displayName":"Sonnet 9"}]'
+        if test "$SCENARIO" = no_model; then models='[]'; fi
+        echo "{\"type\":\"control_response\",\"response\":{\"request_id\":\"catalog\",\"response\":{\"models\":$models}}}" ;;
+    *' --print '*)
+        echo called >> "$HOME/claude-attempts"
+        test ! -e "$PWD/Cargo.toml" || exit 4
+        case " $* " in *' --safe-mode --restricted --strict-mcp-config '*) ;; *) exit 5;; esac
+        model='sonnet[1m]'
+        if test "$SCENARIO" = series; then model=claude-haiku-5-10; fi
+        case " $* " in *" --model $model --max-turns 1 --tools  --permission-mode dontAsk --no-session-persistence "*) ;; *) exit 6;; esac
+        case " $* " in *' -- Reply with OK only. ') ;; *) exit 7;; esac
+        if test "$SCENARIO" = claude_wait; then exec sleep 60; fi
+        if test "$SCENARIO" = claude_error; then
+            echo '{"type":"result","subtype":"success","is_error":true}'
+            exit 1
+        fi
+        echo '{"type":"result","subtype":"success","is_error":false,"result":"PRIVATE-RESPONSE"}'
+        ;;
+    *) exit 3;;
+esac
+"#;
+
+#[test]
+fn independent_claude_and_codex_reservations() {
+    for (scenario, expected, calls) in [
+        ("success", "ok", 1),
+        ("claude_key", "login", 0),
+        ("claude_changed", "changed", 0),
+        ("claude_limited", "limited", 0),
+        ("claude_expired_limit", "ok", 1),
+        ("claude_error", "error", 1),
+        ("claude_wait", "timeout", 1),
+        ("claude_off", "off", 0),
+    ] {
+        let (u, tz) = scheduled_user("00:00", "23:59");
+        u.fake("claude", SCHEDULE_CLAUDE);
+        u.run("install");
+        let config = u.path("home/.config/ai-usage-tray");
+        let mut claude = load(&config.join("schedule.json"));
+        claude["model"] = "sonnet[1m]".into();
+        claude["termsConsentVersion"] = 1.into();
+        if scenario != "claude_off" {
+            fs::write(config.join("claude-schedule.json"), claude.to_string()).unwrap();
+        }
+        if matches!(scenario, "claude_limited" | "claude_expired_limit") {
+            let reset = if scenario == "claude_limited" {
+                4_000_000_000_i64
+            } else {
+                1
+            };
+            let usage =
+                json!({"rate_limits":{"five_hour":{"used_percentage":100,"resets_at":reset}}});
+            u.capture(usage.to_string().as_bytes());
+        }
+        let state_dir = u.path("home/.local/state/ai-usage-tray");
+        let record = state_dir.join("claude-scheduled-call.json");
+        // Watch the real workers concurrently. Codex must complete even if Claude hangs.
+        let (mut first, rx) = scheduled_worker(&u, &tz, scenario);
+        let (mut second, _second_updates) = scheduled_worker(&u, &tz, scenario);
+        wait_schedule(&rx, "schedule", |s| s["last"]["status"] == "ok");
+        let until = Instant::now() + Duration::from_secs(5);
+        if scenario == "claude_wait" {
+            while !u.path("home/claude-attempts").exists() {
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(10));
+            }
+        } else if scenario != "claude_off" {
+            while json_record_status(&record).as_deref() != Some(expected) {
+                assert!(Instant::now() < until, "Claude scenario {scenario}");
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        first.stdin.take();
+        second.stdin.take();
+        assert!(first.wait().unwrap().success() && second.wait().unwrap().success());
+        assert_eq!(
+            fs::read_to_string(u.path("home/attempts"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        if scenario == "claude_off" {
+            assert!(!record.exists());
+        } else {
+            assert_eq!(load(&record)["status"], expected);
+            assert!(
+                !fs::read_to_string(&record)
+                    .unwrap()
+                    .contains("PRIVATE-RESPONSE")
+            );
+            let (mut resumed, rx) = scheduled_worker(&u, &tz, scenario);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let event = rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap();
+                if event["claudeSchedule"]["last"]["status"] == expected
+                    || (scenario == "claude_changed" && event["claudeSchedule"]["status"] == "off")
+                {
+                    break;
+                }
+            }
+            resumed.stdin.take();
+            assert!(resumed.wait().unwrap().success());
+        }
+        assert_eq!(
+            fs::read_to_string(u.path("home/claude-attempts"))
+                .unwrap_or_default()
+                .lines()
+                .count(),
+            calls
+        );
+        u.run("uninstall");
+        assert!(
+            !config.join("claude-schedule.json").exists()
+                && !record.exists()
+                && !record.with_extension("lock").exists()
+        );
+    }
+}
+
+#[test]
+fn claude_without_consent_waits_without_claiming_a_due_call() {
+    let (u, tz) = scheduled_user("00:00", "23:59");
+    u.fake("claude", SCHEDULE_CLAUDE);
+    let dir = u.path("home/.config/ai-usage-tray");
+    let file = dir.join("claude-schedule.json");
+    let mut config = load(&dir.join("schedule.json"));
+    config["model"] = "sonnet[1m]".into();
+    let record = u.path("home/.local/state/ai-usage-tray/claude-scheduled-call.json");
+    for marker in [None, Some(json!(true)), Some(json!(2))] {
+        if let Some(value) = marker {
+            config["termsConsentVersion"] = value;
+        }
+        fs::write(&file, config.to_string()).unwrap();
+        let (mut child, rx) = scheduled_worker(&u, &tz, "success");
+        wait_schedule(&rx, "claudeSchedule", |s| s["status"] == "consent_required");
+        child.stdin.take();
+        assert!(child.wait().unwrap().success());
+        assert!(!record.exists() && !u.path("home/claude-attempts").exists());
+    }
+    let (mut child, rx) = scheduled_worker(&u, &tz, "success");
+    wait_schedule(&rx, "claudeSchedule", |s| s["status"] == "consent_required");
+    config["termsConsentVersion"] = 1.into();
+    fs::write(&file, config.to_string()).unwrap();
+    wait_schedule(&rx, "claudeSchedule", |s| s["last"]["status"] == "ok");
+    child.stdin.take();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(
+        fs::read_to_string(u.path("home/claude-attempts"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn repeated_calls_use_the_latest_available_model_and_resume_once() {
+    let keys = [
+        (
+            "schedule",
+            "scheduled-call.json",
+            "home/attempts",
+            "gpt-5.10-luna",
+        ),
+        (
+            "claudeSchedule",
+            "claude-scheduled-call.json",
+            "home/claude-attempts",
+            "Haiku 5.10",
+        ),
+    ];
+    for scenario in ["series", "no_model"] {
+        let (u, tz) = scheduled_user("00:00", "23:59");
+        u.fake("claude", SCHEDULE_CLAUDE);
+        let dir = u.path("home/.config/ai-usage-tray");
+        let mut config = load(&dir.join("schedule.json"));
+        config["model"] = "".into();
+        config["repeatCount"] = 3.into();
+        config["followUpMinutes"] = 15.into();
+        fs::write(dir.join("schedule.json"), config.to_string()).unwrap();
+        config["termsConsentVersion"] = 1.into();
+        fs::write(dir.join("claude-schedule.json"), config.to_string()).unwrap();
+        let status = if scenario == "series" {
+            "ok"
+        } else {
+            "no_model"
+        };
+        let final_round = if scenario == "series" { 3 } else { 1 };
+        for ordinal in 1..=final_round {
+            let (mut worker, rx) = scheduled_worker(&u, &tz, scenario);
+            let (mut other, _rx2) = scheduled_worker(&u, &tz, scenario);
+            let mut seen = std::collections::HashMap::new();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while seen.len() < keys.len() {
+                let event = rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap();
+                for (key, _, _, _) in keys {
+                    let state = &event[key];
+                    let last = &state["last"];
+                    if last["status"] != status || last["ordinal"] != ordinal {
+                        continue;
+                    }
+                    if ordinal == final_round {
+                        seen.insert(key, 0);
+                    } else if state["ordinal"] == ordinal + 1 {
+                        let next = state["next"].as_i64().unwrap();
+                        let delta = next - last["time"].as_i64().unwrap();
+                        assert!((18000..18900).contains(&delta));
+                        seen.insert(key, next);
+                    }
+                }
+            }
+            for worker in [&mut worker, &mut other] {
+                worker.stdin.take();
+                assert!(worker.wait().unwrap().success());
+            }
+            if ordinal < final_round {
+                // Move only the isolated fixture's previous dispatch into the past,
+                // so the scheduled worker sees the same next slot as due on restart.
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+                for (key, record, calls, _) in keys {
+                    assert_eq!(
+                        fs::read_to_string(u.path(calls)).unwrap().lines().count(),
+                        ordinal as usize
+                    );
+                    let path = u.path("home/.local/state/ai-usage-tray").join(record);
+                    let mut last = load(&path);
+                    let past = last["time"].as_i64().unwrap() - (seen[key] - now + 1);
+                    last["time"] = past.into();
+                    last["pending"][0]["time"] = past.into();
+                    fs::write(&path, last.to_string()).unwrap();
+                }
+            }
+        }
+        for (_, record, calls, model) in keys {
+            let last = load(&u.path("home/.local/state/ai-usage-tray").join(record));
+            assert_eq!(
+                fs::read_to_string(u.path(calls))
+                    .unwrap_or_default()
+                    .lines()
+                    .count(),
+                if scenario == "series" { 3 } else { 0 }
+            );
+            if scenario == "series" {
+                assert_eq!(last["model"], model);
+            }
+        }
+    }
+}
+
+#[test]
+fn old_pending_repeats_move_to_the_five_hour_window_and_expire() {
+    use sha2::{Digest, Sha256};
+    let (u, tz) = scheduled_user("07:30", "07:45");
+    let file = u.path("home/.config/ai-usage-tray/schedule.json");
+    let mut config = load(&file);
+    config["repeatCount"] = 3.into();
+    config["minDelaySeconds"] = 30.into();
+    config["maxDelaySeconds"] = 90.into();
+    fs::write(&file, config.to_string()).unwrap();
+    let id = format!("{:x}", Sha256::digest(serde_json::to_vec(&config).unwrap()));
+    let path = u.path("home/.local/state/ai-usage-tray/scheduled-call.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let time: chrono::DateTime<chrono::Utc> = SystemTime::now().into();
+    for missed in [false, true] {
+        let sent = time.timestamp() - if missed { 6 * 3600 } else { 120 };
+        let legacy = json!({"day":time.date_naive().to_string(),"time":sent,"ordinal":1,
+            "total":3,"status":"ok","next":sent+30,"scheduleId":id});
+        fs::write(&path, legacy.to_string()).unwrap();
+        let (mut worker, rx) = scheduled_worker(&u, &tz, "success");
+        let state = wait_schedule(&rx, "schedule", |s| s["next"].is_number());
+        if missed {
+            assert_eq!(state["ordinal"], 1);
+            assert!(state["next"].as_i64().unwrap() > time.timestamp());
+        } else {
+            assert_eq!(state["ordinal"], 2);
+            assert!((18000..18900).contains(&(state["next"].as_i64().unwrap() - sent)));
+        }
+        worker.stdin.take();
+        assert!(worker.wait().unwrap().success());
+        assert!(!u.path("home/attempts").exists());
+    }
+}
+
+#[test]
+fn overlapping_daily_reservations_keep_both_pending_repeats() {
+    use sha2::{Digest, Sha256};
+    let (u, tz) = scheduled_user("00:00", "23:59");
+    let file = u.path("home/.config/ai-usage-tray/schedule.json");
+    let mut config = load(&file);
+    config["repeatCount"] = 3.into();
+    config["followUpMinutes"] = 600.into();
+    fs::write(&file, config.to_string()).unwrap();
+    let id = format!("{:x}", Sha256::digest(serde_json::to_vec(&config).unwrap()));
+    let now: chrono::DateTime<chrono::Utc> = SystemTime::now().into();
+    let yesterday = now.date_naive().pred_opt().unwrap().to_string();
+    let earlier = now.timestamp() - 4 * 3600;
+    let record = json!({"day":yesterday,"ordinal":2,"time":earlier,"status":"ok","scheduleId":id,
+        "first":{"day":yesterday,"time":now.timestamp()-86400},
+        "pending":[{"day":yesterday,"ordinal":2,"time":earlier}]});
+    let path = u.path("home/.local/state/ai-usage-tray/scheduled-call.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, record.to_string()).unwrap();
+    let (mut worker, rx) = scheduled_worker(&u, &tz, "success");
+    let state = wait_schedule(&rx, "schedule", |s| {
+        s["last"]["pending"]
+            .as_array()
+            .is_some_and(|p| p.len() == 2)
+    });
+    let pending = state["last"]["pending"].as_array().unwrap();
+    assert_eq!(pending[0], record["pending"][0]);
+    assert_eq!(pending[1]["day"], now.date_naive().to_string());
+    assert_eq!(pending[1]["ordinal"], 1);
+    worker.stdin.take();
+    assert!(worker.wait().unwrap().success());
+    assert_eq!(
+        fs::read_to_string(u.path("home/attempts"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
 }

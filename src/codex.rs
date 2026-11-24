@@ -1,17 +1,11 @@
-use crate::common::*;
+use crate::{common::*, schedule::Call};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    env,
     io::{self, BufRead, BufReader, Read, Write},
-    os::unix::process::CommandExt,
-    process::{ChildStdin, ChildStdout, Command, Stdio},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
-    thread,
-    time::{Duration, Instant},
+    process::{ChildStdin, ChildStdout},
+    sync::atomic::AtomicBool,
+    time::Duration,
 };
 
 fn windows(result: &Value) -> Vec<Value> {
@@ -60,19 +54,21 @@ impl Rpc {
         self.input.write_all(b"\n")?;
         Ok(())
     }
-    fn response(&mut self, id: i64) -> Result<Value, Failure> {
+    fn message(&mut self) -> Result<Value, Failure> {
         let mut line = Vec::new();
+        let size = self
+            .output
+            .by_ref()
+            .take(4 * 1024 * 1024 + 1)
+            .read_until(b'\n', &mut line)?;
+        if size == 0 || size > 4 * 1024 * 1024 {
+            return Err(Failure::Protocol);
+        }
+        Ok(serde_json::from_slice(&line)?)
+    }
+    fn response(&mut self, id: i64) -> Result<Value, Failure> {
         loop {
-            line.clear();
-            let size = self
-                .output
-                .by_ref()
-                .take(4 * 1024 * 1024 + 1)
-                .read_until(b'\n', &mut line)?;
-            if size == 0 || size > 4 * 1024 * 1024 {
-                return Err(Failure::Protocol);
-            }
-            let mut msg: Value = serde_json::from_slice(&line)?;
+            let mut msg = self.message()?;
             if msg["id"].as_i64() != Some(id) {
                 continue;
             }
@@ -101,10 +97,119 @@ impl Rpc {
             return Ok(msg["result"].take());
         }
     }
-    fn exchange(mut self) -> Result<Value, Failure> {
+    fn initialize(&mut self) -> Result<(), Failure> {
         self.send(json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"ai_usage_tray","title":"AI Usage Tray","version":"1.0"},"capabilities":{}}}))?;
         self.response(1)?;
-        self.send(json!({"method":"initialized","params":{}}))?;
+        self.send(json!({"method":"initialized","params":{}}))
+    }
+    fn latest_luna(&mut self) -> Result<Option<String>, Failure> {
+        let mut cursor = Value::Null;
+        let mut seen = std::collections::HashSet::new();
+        let mut best = None;
+        loop {
+            self.send(
+                json!({"id":6,"method":"model/list","params":{"cursor":cursor,"limit":100}}),
+            )?;
+            let page = self.response(6)?;
+            for entry in page["data"].as_array().ok_or(Failure::Protocol)? {
+                let Some(id) = entry["model"].as_str() else {
+                    continue;
+                };
+                if entry["hidden"] == true {
+                    continue;
+                }
+                let Some(version) = id
+                    .strip_prefix("gpt-")
+                    .and_then(|s| s.strip_suffix("-luna"))
+                else {
+                    continue;
+                };
+                let Ok(parts) = version
+                    .split('.')
+                    .map(str::parse::<u64>)
+                    .collect::<Result<Vec<_>, _>>()
+                else {
+                    continue;
+                };
+                let candidate = (parts, id.to_owned());
+                if best.as_ref().is_none_or(|current| &candidate > current) {
+                    best = Some(candidate);
+                }
+            }
+            let Some(next) = page["nextCursor"].as_str().filter(|s| !s.is_empty()) else {
+                break;
+            };
+            if !seen.insert(next.to_owned()) {
+                return Err(Failure::Protocol);
+            }
+            cursor = next.into();
+        }
+        Ok(best.map(|(_, id)| id))
+    }
+    fn scheduled(&mut self, call: &Call, cwd: &std::path::Path) -> Result<Value, Failure> {
+        self.send(json!({"id":2,"method":"account/read","params":{"refreshToken":false}}))?;
+        if self.response(2)?["account"]["type"] != "chatgpt" {
+            return Err(Failure::Login);
+        }
+        self.send(json!({"id":5,"method":"account/rateLimits/read","params":{}}))?;
+        if windows(&self.response(5)?).iter().any(exhausted) {
+            return Ok(empty("scheduled", "limited"));
+        }
+        let model = if call.model.is_empty() {
+            let Some(id) = self.latest_luna()? else {
+                return Ok(empty("scheduled", "no_model"));
+            };
+            id
+        } else {
+            call.model.clone()
+        };
+        self.send(json!({"id":3,"method":"thread/start","params":{
+            "model":model, "modelProvider":"openai", "cwd":cwd, "ephemeral":true,
+            "sandbox":"read-only", "approvalPolicy":"never",
+            "baseInstructions":"Answer the user's message directly without using tools.",
+            "config":{"project_doc_max_bytes":0, "web_search":"disabled",
+                "features.shell_tool":false, "features.unified_exec":false,
+                "features.hooks":false, "features.multi_agent_v2":false, "features.apps":false,
+                "mcp_servers":{}}
+        }}))?;
+        let started = self.response(3)?;
+        if started["model"] != model || started["modelProvider"] != "openai" {
+            return Err(Failure::Remote);
+        }
+        let thread = started["thread"]["id"].as_str().ok_or(Failure::Protocol)?;
+        if let Some(status) = call.skipped() {
+            return Ok(empty("scheduled", status));
+        }
+        let sent_at = now().ceil() as i64;
+        self.send(json!({"id":4,"method":"turn/start","params":{
+            "threadId":thread, "input":[{"type":"text","text":"Reply with OK only."}]
+        }}))?;
+        let started = self.response(4)?;
+        let turn = started["turn"]["id"].as_str().ok_or(Failure::Protocol)?;
+        loop {
+            let message = self.message()?;
+            let params = &message["params"];
+            if message["method"] == "turn/completed"
+                && params["threadId"] == thread
+                && params["turn"]["id"] == turn
+            {
+                return match params["turn"]["status"].as_str() {
+                    Some("completed") => {
+                        let mut result = empty("scheduled", "ok");
+                        result["selectedModel"] = model.into();
+                        result["sentAt"] = sent_at.into();
+                        Ok(result)
+                    }
+                    _ => Err(Failure::Remote),
+                };
+            }
+            // An unattended turn cannot approve tool calls or answer follow-up requests.
+            if message.get("id").is_some() && message.get("method").is_some() {
+                return Err(Failure::Remote);
+            }
+        }
+    }
+    fn usage(&mut self) -> Result<Value, Failure> {
         self.send(json!({"id":2,"method":"account/rateLimits/read","params":{}}))?;
         let result = match self.response(2) {
             Err(Failure::Remote) => {
@@ -131,75 +236,49 @@ impl Rpc {
 }
 
 pub fn read(paths: &Paths, cancel: &AtomicBool, timeout: Duration) -> Value {
-    let Some(cli) = paths.find_cli("codex") else {
+    run(paths, cancel, timeout, None)
+}
+pub fn scheduled(paths: &Paths, cancel: &AtomicBool, call: Call) -> Value {
+    let Ok(workspace) = tempfile::tempdir() else {
+        return empty("scheduled", "error");
+    };
+    run(
+        paths,
+        cancel,
+        Duration::from_secs(90),
+        Some((call, workspace)),
+    )
+}
+fn run(
+    paths: &Paths,
+    cancel: &AtomicBool,
+    timeout: Duration,
+    scheduled: Option<(Call, tempfile::TempDir)>,
+) -> Value {
+    let Some(mut cmd) = crate::cli::command(paths, "codex") else {
         return empty("app-server", "missing");
     };
-    let mut dirs = vec![cli.parent().unwrap().to_owned()];
-    if let Some(node) = paths.find_cli("node") {
-        dirs.push(node.parent().unwrap().to_owned())
-    }
-    dirs.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
-    let mut cmd = Command::new(cli);
-    if let Ok(path) = env::join_paths(dirs) {
-        cmd.env("PATH", path);
-    }
     if let Some(profile) = paths.configured("CODEX_HOME") {
         cmd.env("CODEX_HOME", profile);
     }
-    cmd.arg("app-server")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0);
-    let Ok(mut child) = cmd.spawn() else {
-        return empty("app-server", "error");
-    };
-    let rpc = Rpc {
-        input: child.stdin.take().unwrap(),
-        output: BufReader::new(child.stdout.take().unwrap()),
-    };
-    let (send, recv) = mpsc::channel();
-    let io_job = thread::spawn(move || {
-        let _ = send.send(rpc.exchange());
-    });
-    let deadline = Instant::now() + timeout;
-    let result = loop {
-        if cancel.load(Ordering::Relaxed) || Instant::now() >= deadline {
-            break empty("app-server", "timeout");
+    if let Some((_, workspace)) = &scheduled {
+        cmd.current_dir(workspace.path())
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("CODEX_API_KEY");
+    }
+    cmd.arg("app-server");
+    crate::cli::run(cmd, cancel, timeout, "app-server", move |input, output| {
+        let mut rpc = Rpc {
+            input,
+            output: BufReader::new(output),
+        };
+        match rpc.initialize().and_then(|()| match scheduled {
+            Some((call, workspace)) => rpc.scheduled(&call, workspace.path()),
+            None => rpc.usage(),
+        }) {
+            Ok(value) => value,
+            Err(Failure::Login) => empty("app-server", "login"),
+            Err(_) => empty("app-server", "error"),
         }
-        let wait = deadline
-            .saturating_duration_since(Instant::now())
-            .min(Duration::from_millis(100));
-        match recv.recv_timeout(wait) {
-            Ok(Ok(v)) => break v,
-            Ok(Err(Failure::Login)) => break empty("app-server", "login"),
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            _ => break empty("app-server", "error"),
-        }
-    };
-    // Successful exchanges close stdin. Give app-server a moment to finish its own cleanup.
-    if result["status"] != "timeout" {
-        let until = Instant::now() + Duration::from_millis(300);
-        while Instant::now() < until {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                let _ = io_job.join();
-                return result;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-    // The dedicated group includes CLI launcher children. Its leader is still unreaped.
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGTERM);
-    }
-    let until = Instant::now() + Duration::from_millis(200);
-    while !io_job.is_finished() && Instant::now() < until {
-        thread::sleep(Duration::from_millis(10));
-    }
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
-    }
-    let _ = child.wait();
-    let _ = io_job.join();
-    result
+    })
 }

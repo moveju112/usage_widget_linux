@@ -14,7 +14,16 @@ const SCHEMA: &str = "schemas/org.gnome.shell.extensions.ai-usage-tray.gschema.x
 const ASSETS: &[(&str, &[u8])] = &[
     ("extension.js", include_bytes!("../extension/extension.js")),
     ("updates.js", include_bytes!("../extension/updates.js")),
+    (
+        "schedulePrefs.js",
+        include_bytes!("../extension/schedulePrefs.js"),
+    ),
     ("prefs.js", include_bytes!("../extension/prefs.js")),
+    ("settings.js", include_bytes!("../extension/settings.js")),
+    (
+        "scheduleWindow.js",
+        include_bytes!("../extension/scheduleWindow.js"),
+    ),
     ("usageView.js", include_bytes!("../extension/usageView.js")),
     (
         "claude-symbolic.svg",
@@ -414,14 +423,20 @@ fn start(dest: &Path) -> io::Result<()> {
                 "GNOME에서 활성 상태를 확인할 수 없어. gnome-extensions info ai-usage-tray@local 로 확인해줘.",
             ));
         }
-        let live_version = live_info
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("Version: ")?.parse::<u64>().ok());
+        let live_version = live_info.lines().find_map(|line| {
+            let field = line.trim().strip_prefix("Version: ")?;
+            // GNOME prints either "4" or "0.1.0 (4)".
+            let number = field
+                .rsplit_once(" (")
+                .and_then(|(_, tail)| tail.strip_suffix(')'))
+                .unwrap_or(field);
+            number.parse::<u64>().ok()
+        });
         let installed_version =
             json_file(&dest.join("metadata.json")).and_then(|data| data["version"].as_u64());
         if matches!((live_version, installed_version), (Some(a), Some(b)) if a != b) {
             println!(
-                "현재 세션은 이전 AI Usage Tray를 실행 중이야. 새 표시 방식은 다음 GNOME 로그인부터 적용돼."
+                "현재 세션은 이전 AI Usage Tray를 실행 중이야. 새 버전은 다음 GNOME 로그인부터 적용돼."
             );
         } else {
             println!("GNOME 패널에서 AI Usage Tray를 활성화했어.");
@@ -468,6 +483,16 @@ fn uninstall(dest: &Path, mut config: Settings) -> io::Result<()> {
         remove_file(&state.join("capture.lock"))?;
         let _ = fs::remove_dir(state);
     }
+    let config = crate::schedule::config_dir();
+    let state = crate::schedule::state_dir();
+    for provider in crate::schedule::Provider::ALL {
+        remove_file(&config.join(provider.config_file()))?;
+        let record = state.join(provider.record_file());
+        remove_file(&record)?;
+        remove_file(&record.with_extension("lock"))?;
+    }
+    let _ = fs::remove_dir(config);
+    let _ = fs::remove_dir(state);
     println!("제거 완료");
     Ok(())
 }
@@ -490,7 +515,7 @@ pub fn installed_version(dest: &Path) -> io::Result<String> {
             Ok(version.clone())
         }
         None if metadata["uuid"] == UUID && matches!(metadata["version"].as_u64(), Some(1 | 2)) => {
-            Ok("1.0.0".into())
+            Ok("0.0.0".into())
         }
         _ => Err(io::Error::other("설치 버전을 확인할 수 없어.")),
     }
@@ -506,7 +531,7 @@ pub fn apply_update(expected: &str) -> io::Result<()> {
     let lock = fs::File::open(dest.parent().unwrap())?;
     lock.lock()?;
     let installed = installed_version(&dest)?;
-    if crate::update::version(&installed) >= crate::update::version(candidate) {
+    if crate::update::installed_order(&installed) >= crate::update::version(candidate) {
         println!("current {installed}");
     } else {
         install(&dest, None)?;

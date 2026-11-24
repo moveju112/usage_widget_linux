@@ -9,6 +9,8 @@ use std::{
 };
 
 const REPO: &str = "moveju112/usage_widget_linux";
+// This tag was published before the project restarted its numbering at 0.1.0.
+const LEGACY_TAG: &str = "v1.1.0";
 const MAX_BINARY: u64 = 32 * 1024 * 1024;
 
 pub fn version(text: &str) -> Option<[u64; 3]> {
@@ -25,6 +27,14 @@ pub fn version(text: &str) -> Option<[u64; 3]> {
         *n = part.parse().ok()?;
     }
     parts.next().is_none().then_some(numbers)
+}
+
+pub fn installed_order(number: &str) -> Option<[u64; 3]> {
+    if LEGACY_TAG.strip_prefix('v') == Some(number) {
+        Some([0, 0, 0])
+    } else {
+        version(number)
+    }
 }
 
 fn fetch(url: &str, file: &Path, limit: u64, asset: bool) -> io::Result<u16> {
@@ -98,7 +108,9 @@ fn newer<'a>(data: &'a Value, installed: &str) -> io::Result<Option<Release<'a>>
         .as_str()
         .and_then(|s| s.strip_prefix('v'))
         .ok_or_else(bad_release)?;
-    if version(number).ok_or_else(bad_release)? <= version(installed).ok_or_else(bad_release)? {
+    if version(number).ok_or_else(bad_release)?
+        <= installed_order(installed).ok_or_else(bad_release)?
+    {
         return Ok(None);
     }
     let name = format!("ai-usage-tray-linux-{}", env::consts::ARCH);
@@ -165,8 +177,12 @@ pub fn run(action: &str, as_json: bool) -> io::Result<()> {
         return Ok(());
     }
     http_ok(code)?;
-    let data = serde_json::from_reader(fs::File::open(index)?)
+    let data: Value = serde_json::from_reader(fs::File::open(index)?)
         .map_err(|_| io::Error::other("GitHub 릴리스 정보를 읽을 수 없어."))?;
+    if data["tag_name"] == LEGACY_TAG {
+        report("unpublished", &installed, as_json);
+        return Ok(());
+    }
     let Some(release) = newer(&data, &installed)? else {
         report("current", &installed, as_json);
         return Ok(());

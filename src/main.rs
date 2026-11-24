@@ -1,10 +1,13 @@
 mod claude;
+mod cli;
 mod codex;
 mod common;
 mod install;
+mod schedule;
 mod update;
 
 use common::*;
+use schedule::Provider;
 use serde_json::{Value, json};
 use std::{
     env,
@@ -23,6 +26,7 @@ const INTERVAL: Duration = Duration::from_secs(120);
 enum Event {
     Refresh,
     Closed,
+    Schedule(Provider, Value),
     Codex(Value),
 }
 
@@ -34,8 +38,7 @@ fn publish(state: &Value) -> io::Result<()> {
 }
 fn serve(paths: Arc<Paths>) -> io::Result<()> {
     let mut reader = claude::Reader::default();
-    let mut state =
-        json!({"claude":reader.read(&paths),"codex":empty("app-server","loading"),"notice":""});
+    let mut state = json!({"claude":reader.read(&paths),"codex":empty("app-server","loading"),"notice":"","schedule":{"status":"off"},"claudeSchedule":{"status":"off"}});
     publish(&state)?;
     let (tx, rx) = mpsc::channel();
     let input = tx.clone();
@@ -48,6 +51,16 @@ fn serve(paths: Arc<Paths>) -> io::Result<()> {
         let _ = input.send(Event::Closed);
     });
     let cancel = Arc::new(AtomicBool::new(false));
+    let schedulers = Provider::ALL.map(|provider| {
+        let (stop, stopped) = mpsc::channel();
+        let (paths, cancel, output) = (paths.clone(), cancel.clone(), tx.clone());
+        let worker = thread::spawn(move || {
+            schedule::watch(provider, paths, cancel, stopped, |value| {
+                let _ = output.send(Event::Schedule(provider, value));
+            })
+        });
+        (stop, worker)
+    });
     let mut job = None;
     let mut next_query = Instant::now();
     let mut next_local = next_query + Duration::from_secs(2);
@@ -69,6 +82,10 @@ fn serve(paths: Arc<Paths>) -> io::Result<()> {
         let mut changed = false;
         match event {
             Ok(Event::Closed) | Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
+            Ok(Event::Schedule(provider, value)) => {
+                changed = state[provider.state_key()] != value;
+                state[provider.state_key()] = value;
+            }
             Ok(Event::Codex(mut value)) => {
                 if let Some(handle) = job.take() {
                     let _ = handle.join();
@@ -100,6 +117,10 @@ fn serve(paths: Arc<Paths>) -> io::Result<()> {
         }
     };
     cancel.store(true, Ordering::Relaxed);
+    for (stop, worker) in schedulers {
+        drop(stop);
+        let _ = worker.join();
+    }
     if let Some(handle) = job {
         let _ = handle.join();
     }

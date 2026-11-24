@@ -5,6 +5,7 @@
 .aut-columns { spacing: 12px; }
 .aut-section { spacing: 4px; }
 .aut-heading { spacing: 14px; padding-bottom: 5px; }
+.aut-menu-actions { spacing: 4px; }
 .aut-name { font-size: 1.15em; font-weight: bold; }
 .aut-row { spacing: 7px; }
 .aut-period { min-width: 3.3em; }
@@ -26,6 +27,10 @@
 .aut-pair, .aut-period-title { spacing: 3px; }
 .aut-period-title, .aut-small { font-size: 0.85em; }
 .aut-amount, .aut-cell-value { font-weight: bold; }
+.aut-stacked { font-family: monospace; }
+.aut-stack-period { padding-right: 2px; }
+.aut-stack-value { min-width: 3.1em; }
+.aut-stack-marker { min-width: 0.65em; }
 .aut-cell-value { font-size: 1.3em; }
 .aut-separator { width: 1px; height: 14px; background-color: rgba(160,160,160,0.45); }
 .aut-brand-claude { color: #df916c; }

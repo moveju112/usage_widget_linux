@@ -2,10 +2,18 @@ name: Release AI Usage Tray
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '빌드할 기존 릴리스 태그 (예: v1.1.0)'
+        required: true
+        type: string
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 permissions:
   contents: read
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -21,6 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           persist-credentials: false
       - name: Install test tools
         run: |
@@ -30,8 +39,8 @@ jobs:
       - name: Validate release version
         run: |
           version=$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[0].version')
-          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          test "$GITHUB_REF_NAME" = "v$version"
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$RELEASE_TAG" = "v$version"
           test "$(jq -r '.["version-name"]' extension/metadata.json)" = "$version"
       - name: Test and build
         env:
@@ -41,7 +50,7 @@ jobs:
           cargo test --locked
           gjs -m tests/test_display.js
           cargo build --release --locked
-          test "v$(./target/release/ai-usage-tray --version)" = "$GITHUB_REF_NAME"
+          test "v$(./target/release/ai-usage-tray --version)" = "$RELEASE_TAG"
           mkdir dist
           cp target/release/ai-usage-tray "dist/ai-usage-tray-linux-$RELEASE_ARCH"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -65,7 +74,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
+          tag="$RELEASE_TAG"
           repo="$GITHUB_REPOSITORY"
           if draft=$(gh release view "$tag" -R "$repo" --json isDraft -q .isDraft); then
             if [[ "$draft" == false ]]; then

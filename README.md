@@ -50,9 +50,11 @@ install -d -m 700 ~/.ssh
 
 연결을 끊으려면 VM에서 `./ai-usage-tray sender-uninstall`을 실행하고, 메인 PC의 `~/.ssh/authorized_keys`에서 `ai-usage-tray-sender`로 끝나는 해당 줄을 지우세요.
 
-## Claude 사용량 파일 (claude.json)
+## 참고: 별도 코딩 에이전트를 쓰는 경우 (claude.json)
 
-Claude Code 터미널을 거치지 않는 작업 에이전트나 도구를 쓴다면, 그 도구가 사용량을 파일로 남기게 해서 패널에 표시할 수 있습니다.
+> 이 절은 Claude Code 터미널 대신 별도 코딩 에이전트나 도구를 사용하는 분을 위한 참고사항입니다. Claude Code만 사용한다면 건너뛰어도 됩니다.
+
+그 에이전트·도구가 Claude 사용량을 파일로 남기게 하면 패널에 표시할 수 있습니다.
 
 1. 사용하는 에이전트·도구가 Claude에서 한도 정보를 받을 때마다 아래 형식의 `claude.json`을 기록하게 합니다.
 2. **트레이 설정 → Claude 사용량 → 이벤트 파일 또는 폴더 경로**에 그 파일이나 폴더 경로를 넣고 적용합니다.

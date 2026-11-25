@@ -6,8 +6,10 @@ const interval = 30 * 60;
 const now = () => Math.floor(Date.now() / 1000);
 
 export class Updates {
-    constructor(settings, binary, runningVersion) {
+    // installed(version) reports the version found on disk after every check or install.
+    constructor(settings, binary, runningVersion, installed = () => {}) {
         this.settings = settings;
+        this.installed = installed;
         this.binary = binary;
         this.runningVersion = runningVersion;
         this.action = Gio.SimpleAction.new_stateful('update', null, textState('실행 중 v' + runningVersion));
@@ -59,9 +61,10 @@ export class Updates {
                 if (!this.settings) return;
             }
             const v = 'v' + result.version;
+            if (result.state !== 'available') this.installed(result.version);
             if (result.state === 'available') this.action.set_state(textState(v + ' 업데이트 가능'));
             else if (result.state === 'installed' || result.version !== this.runningVersion)
-                this.action.set_state(textState(v + ' 설치됨 · 다시 로그인하면 적용'));
+                this.action.set_state(textState(v + ' 설치됨 · 패널 화면은 다시 로그인하면 적용'));
             else if (result.state === 'unpublished') this.action.set_state(textState('공개된 안정 릴리스 없음'));
             else this.action.set_state(textState(v + ' 최신 버전'));
         } catch (err) {

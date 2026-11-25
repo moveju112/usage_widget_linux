@@ -8,7 +8,8 @@ function assert(value, message) {
 
 // Run with a compiled test schema and GSETTINGS_BACKEND=memory.
 const settings = new Gio.Settings({schema_id: 'org.gnome.shell.extensions.ai-usage-tray'});
-const updates = new Updates(settings, '', '0.7.0');
+const onDisk = [];
+const updates = new Updates(settings, '', '0.7.0', version => onDisk.push(version));
 const calls = [];
 let finishCheck;
 updates.command = async name => {
@@ -36,11 +37,13 @@ await new Promise(resolve => GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
 }));
 assert(calls.join() === 'check-update' && !updates.timer && !updates.busy,
     'opting out while checking skips installation and the next timer');
+assert(!onDisk.length, 'an available release that was not installed is not reported as on disk');
 
 await updates.run(false);
 assert(calls.length === 1, 'disabled automatic updates perform no lookup');
 await updates.run(true);
 assert(calls.join() === 'check-update,update' && !updates.timer, 'manual update works while disabled');
+assert(onDisk.join() === '0.8.0', 'an installed update reports the version now on disk');
 
 settings.set_boolean('auto-update', true);
 assert(updates.timer, 'opting back in schedules the next check');

@@ -60,7 +60,8 @@ export default class AIUsageTray extends Extension {
         this._content.actor.add_child(this._legend);
         this._notice = label('', 'aut-notice');
         this._content.actor.add_child(this._notice);
-        this._updates = new Updates(this._settings, this.path + '/ai-usage-tray', this.metadata['version-name']);
+        this._updates = new Updates(this._settings, this.path + '/ai-usage-tray', this.metadata['version-name'],
+            version => { this._installed = version; this._render(true); });
         this._actions = new Gio.SimpleActionGroup();
         this._actions.add_action(this._updates.action);
         const refresh = Gio.SimpleAction.new_stateful('refresh', null, textState(''));
@@ -258,9 +259,15 @@ export default class AIUsageTray extends Extension {
         // An interrupted scheduled call is never replayed, so restarting waits for it to finish.
         const restart = this._actions.lookup_action('restart');
         restart.set_enabled(!calling);
-        restart.set_state(textState(calling ? '예약 호출 중 · 끝나면 다시 시작할 수 있어.'
+        const outdated = Boolean(this._installed && this._process && this._state.version !== this._installed);
+        restart.set_state(textState(calling ? '예약 호출 중 · 끝나면 ' + (outdated ? '새 버전으로 다시 시작해.' : '다시 시작할 수 있어.')
             : !this._process ? '수집 중지됨 · 누르면 다시 시작해.'
                 : (this._state.version ? 'v' + this._state.version + ' · ' : '') + localTime(this._started, true) + ' 시작'));
+        // A worker older than the files on disk is replaced once per check, after any call in flight.
+        if (outdated && !calling) {
+            this._installed = null;
+            this._restart();
+        }
     }
 
     _section(view, columns, narrow) {

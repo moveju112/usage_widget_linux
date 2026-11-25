@@ -422,6 +422,11 @@ fn github_release_update_and_recovery() {
     states.sort_unstable();
     assert_eq!(states, ["current", "installed"]);
     assert_eq!(load(&metadata)["version-name"], version);
+    // GNOME stops the worker on the lock screen unless the extension stays enabled there.
+    assert_eq!(
+        load(&metadata)["session-modes"],
+        json!(["user", "unlock-dialog"])
+    );
     assert_eq!(fs::read(u.cfg()).unwrap(), settings);
     assert_eq!(fs::read(u.dest().join("cli-paths.json")).unwrap(), hints);
     assert_eq!(status("update")["state"], "current");
@@ -1018,4 +1023,191 @@ fn overlapping_daily_reservations_keep_both_pending_repeats() {
             .count(),
         1
     );
+}
+
+#[test]
+fn ssh_sender_outbox_and_receiver_account_isolation() {
+    let vm = User::new();
+    let pc = User::new();
+    vm.fake("systemctl", "exit 0");
+    vm.fake("ssh", "cat >/dev/null; exit 255");
+    pc.run("install");
+    let account = json!({"oauthAccount":{"accountUuid":"fixture-account"}});
+    let vm_profile = vm.path("home/.claude.json");
+    fs::write(&vm_profile, account.to_string()).unwrap();
+    let original = json!({"statusLine":{"type":"command","command":"cat","padding":2}});
+    fs::write(vm.cfg(), original.to_string()).unwrap();
+    let key = vm.path("vm-key");
+    assert!(
+        vm.command("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let install = || {
+        let out = vm
+            .command(BIN)
+            .args(["sender-install", "main"])
+            .arg(&key)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    };
+    let pairing = install();
+    assert_eq!(pairing, install());
+    let keyline = input(pc.command(BIN).arg("receiver-key"), &pairing);
+    assert!(keyline.status.success());
+    let keyline = String::from_utf8(keyline.stdout).unwrap();
+    assert!(keyline.starts_with("restrict,command=\""));
+    let pair: Value = serde_json::from_slice(&pairing).unwrap();
+    let tag = pair["account"].as_str().unwrap();
+    assert!(keyline.contains(&format!(" receive {tag}\" ssh-ed25519 ")));
+
+    let dir = vm.path("data/ai-usage-tray-sender");
+    let pending = dir.join("pending.json");
+    let hook = |percent: u32| {
+        let raw = json!({"rate_limits":{"five_hour":{"used_percentage":percent, "resets_at":2200000000_i64}}, "transcript_path":"private-fixture"}).to_string();
+        let command = load(&vm.cfg())["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let out = input(vm.command("sh").args(["-c", &command]), raw.as_bytes());
+        assert_eq!(out.stdout, raw.as_bytes());
+        assert!(out.status.success());
+    };
+    hook(1);
+    let first = fs::read(&pending).unwrap();
+    let flush = || {
+        vm.command(dir.join("ai-usage-tray"))
+            .arg("sender-flush")
+            .output()
+            .unwrap()
+    };
+    assert!(!flush().status.success());
+    assert_eq!(first, fs::read(&pending).unwrap());
+    hook(0);
+    let latest = fs::read(&pending).unwrap();
+    assert!(!String::from_utf8_lossy(&latest).contains("fixture"));
+    let received =
+        |data: &[u8], expected: &str| input(pc.command(BIN).args(["receive", expected]), data);
+    assert_eq!(received(&latest, tag).stdout, b"ok\n");
+    assert_eq!(received(&first, tag).stdout, b"ok\n");
+    let remote = pc.state()["claude"].clone();
+    assert_eq!(remote["windows"][0]["percent"], 0);
+    assert_eq!(remote["source"], "SSH");
+    assert_eq!(
+        remote["received"],
+        serde_json::from_slice::<Value>(&latest).unwrap()["received"]
+    );
+    let mut invalid: Value = serde_json::from_slice(&latest).unwrap();
+    invalid["transcript"] = "drop".into();
+    assert!(
+        !received(invalid.to_string().as_bytes(), tag)
+            .status
+            .success()
+    );
+    assert!(!received(&vec![b' '; 4097], tag).status.success());
+    let foreign = "a".repeat(64);
+    let mut other: Value = serde_json::from_slice(&latest).unwrap();
+    other["account"] = foreign.clone().into();
+    assert!(!received(other.to_string().as_bytes(), tag).status.success());
+    assert!(
+        !received(other.to_string().as_bytes(), &foreign)
+            .status
+            .success()
+    );
+    assert_eq!(pc.state()["claude"], remote);
+
+    fs::write(pc.path("home/.claude.json"), account.to_string()).unwrap();
+    pc.capture(br#"{"rate_limits":{"seven_day":{"used_percentage":19}}}"#);
+    assert_eq!(pc.state()["claude"]["source"], "statusLine");
+    fs::remove_file(pc.path("bin/claude")).unwrap();
+    assert_eq!(pc.state()["claude"], remote);
+    fs::write(
+        pc.path("home/.claude.json"),
+        r#"{"oauthAccount":{"accountUuid":"different"}}"#,
+    )
+    .unwrap();
+    assert!(!received(&latest, tag).status.success());
+    assert_eq!(pc.state()["claude"]["status"], "missing");
+
+    vm.fake("ssh", "cat >/dev/null; printf 'ok\\n'");
+    assert!(flush().status.success());
+    assert!(!pending.exists());
+    hook(0);
+    assert!(!pending.exists());
+    fs::write(
+        &vm_profile,
+        r#"{"oauthAccount":{"accountUuid":"different"}}"#,
+    )
+    .unwrap();
+    hook(50);
+    assert!(!pending.exists());
+    vm.run("sender-uninstall");
+    assert_eq!(load(&vm.cfg()), original);
+    assert!(!dir.exists());
+    assert!(key.is_file());
+    vm.run("sender-uninstall");
+}
+
+#[test]
+fn headless_and_desktop_hooks_can_be_removed_in_either_order() {
+    for desktop_first in [true, false] {
+        for remove_desktop in [true, false] {
+            let vm = User::new();
+            vm.fake("systemctl", "exit 0");
+            fs::write(
+                vm.path("home/.claude.json"),
+                r#"{"oauthAccount":{"accountUuid":"same"}}"#,
+            )
+            .unwrap();
+            let key = vm.path("key");
+            assert!(
+                vm.command("ssh-keygen")
+                    .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+                    .arg(&key)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let sender = || {
+                assert!(
+                    vm.command(BIN)
+                        .args(["sender-install", "main"])
+                        .arg(&key)
+                        .output()
+                        .unwrap()
+                        .status
+                        .success()
+                )
+            };
+            if desktop_first {
+                vm.run("install");
+                sender();
+            } else {
+                sender();
+                vm.run("install");
+            }
+            let hooks = load(&vm.cfg());
+            sender();
+            vm.run("install");
+            assert_eq!(load(&vm.cfg()), hooks);
+            let (first, second) = if remove_desktop {
+                ("uninstall", "sender-uninstall")
+            } else {
+                ("sender-uninstall", "uninstall")
+            };
+            vm.run(first);
+            vm.capture(b"{}");
+            vm.run(second);
+            assert!(!vm.cfg().exists());
+        }
+    }
 }

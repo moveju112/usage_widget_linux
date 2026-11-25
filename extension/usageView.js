@@ -2,13 +2,21 @@ import Cairo from 'cairo';
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import St from 'gi://St';
-import {panelPeriods, percent, periodLabel, reading} from './display.js';
+import {inlineAmounts, panelPeriods, percent, periodLabel, reading} from './display.js';
 
 const center = Clutter.ActorAlign.CENTER;
 const periodIcons = {300: 'preferences-system-time-symbolic', 10080: 'x-office-calendar-symbolic'};
 
 export function box(vertical, style = '') {
-    return new St.BoxLayout({vertical, style_class: style});
+    const layout = new St.BoxLayout({style_class: style});
+    setBoxVertical(layout, vertical);
+    return layout;
+}
+export function setBoxVertical(layout, vertical) {
+    if (layout.set_orientation)
+        layout.set_orientation(vertical ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL);
+    else
+        layout.set_vertical(vertical);
 }
 export function label(text, style = '') {
     return new St.Label({text, style_class: style, y_align: center});
@@ -25,13 +33,19 @@ function brand(gicon, key, size) {
     return new St.Icon({gicon, icon_size: size, style_class: 'aut-brand-' + key,
         x_align: center, y_align: center});
 }
-function periodTitle(minutes, withIcon) {
+function periodTitle(minutes) {
     const row = box(false, 'aut-period-title');
-    if (withIcon && periodIcons[minutes]) row.add_child(new St.Icon({
+    if (periodIcons[minutes]) row.add_child(new St.Icon({
         icon_name: periodIcons[minutes], icon_size: 13, y_align: center,
     }));
     row.add_child(label(periodLabel(minutes)));
     return row;
+}
+
+function staleClock(size) {
+    return new St.Icon({icon_name: 'preferences-system-time-symbolic',
+        icon_size: Math.max(9, Math.round(size / 3)), style_class: 'aut-stale-clock',
+        x_align: Clutter.ActorAlign.END, y_align: Clutter.ActorAlign.END});
 }
 
 function rings(gicon, key, view, size) {
@@ -73,9 +87,7 @@ function rings(gicon, key, view, size) {
     });
     group.add_child(area);
     group.add_child(brand(gicon, key, Math.round(size * 0.43)));
-    if (view.stale) group.add_child(new St.Icon({icon_name: 'preferences-system-time-symbolic',
-        icon_size: Math.max(9, Math.round(size / 3)), style_class: 'aut-stale-clock',
-        x_align: Clutter.ActorAlign.END, y_align: Clutter.ActorAlign.END}));
+    if (view.stale) group.add_child(staleClock(size));
     return group;
 }
 
@@ -98,22 +110,31 @@ function stackedReadings(view, vertical, thickness) {
 
 export function panelService(gicon, key, view, mode, vertical, thickness) {
     if (mode === 'rings') return rings(gicon, key, view, Math.max(16, Math.min(40, thickness - 4)));
-    const group = box(vertical, 'aut-service');
+    const size = Math.min(22, Math.max(14, thickness - 6));
+    const group = box(vertical, mode === 'stacked' ? 'aut-service' : 'aut-capsule');
     group.y_align = center;
-    group.add_child(brand(gicon, key, Math.min(22, Math.max(14, thickness - 6))));
     if (mode === 'stacked') {
+        group.add_child(brand(gicon, key, size));
         group.add_child(stackedReadings(view, vertical, thickness));
         return group;
     }
-    const lines = box(vertical, vertical ? '' : 'aut-pairs');
-    for (const m of panelPeriods) {
-        const pair = box(vertical, 'aut-pair');
-        if (vertical) pair.add_child(label(m === 300 ? '5h' : '7d', 'aut-small'));
-        else pair.add_child(periodTitle(m, false));
-        pair.add_child(label(reading(view, m).text, 'aut-amount'));
-        lines.add_child(pair);
+    if (vertical) group.add_style_class_name('aut-capsule-vertical');
+    const amounts = inlineAmounts(view);
+    const iconSize = Math.min(18, size);
+    const icon = brand(gicon, key, iconSize);
+    if (view.stale && amounts.length) {
+        const overlay = new St.Widget({layout_manager: new Clutter.BinLayout(), x_align: center, y_align: center});
+        overlay.add_child(icon);
+        overlay.add_child(staleClock(iconSize));
+        group.add_child(overlay);
+    } else {
+        group.add_child(icon);
     }
-    group.add_child(lines);
+    for (const [index, amount] of amounts.entries()) {
+        if (index && !vertical) group.add_child(label('/', 'aut-slash'));
+        group.add_child(label(amount, 'aut-amount'));
+    }
+    if (!amounts.length) group.add_child(label('—', 'aut-amount'));
     return group;
 }
 
@@ -137,6 +158,68 @@ function cell(view, minutes) {
     return group;
 }
 
+function meter(value, key) {
+    const track = new St.Widget({layout_manager: new Clutter.BinLayout(),
+        style_class: 'aut-track', x_expand: true, y_align: center});
+    if (value > 0) {
+        const fill = new St.Widget({style_class: 'aut-fill-' + key, x_expand: true, y_expand: true});
+        fill.set_pivot_point(0, 0.5);
+        fill.set_scale(value / 100, 1);
+        track.add_child(fill);
+    }
+    return track;
+}
+
+export function usageMeters(views, services, icons, narrow, contentWidth) {
+    const layout = new Clutter.GridLayout();
+    const table = new St.Widget({layout_manager: layout, style_class: 'aut-meters',
+        style: 'min-width: ' + contentWidth + 'px;'});
+    const columns = narrow ? 3 : 4;
+    let row = 0;
+    const fullRow = actor => layout.attach(actor, 0, row++, columns, 1);
+    for (const [index, view] of views.entries()) {
+        const key = services[index][0];
+        if (index) fullRow(new St.Widget({style_class: 'aut-rule'}));
+        const head = box(narrow, 'aut-meter-head');
+        const title = box(false, 'aut-service');
+        title.add_child(brand(icons[key], key, 19));
+        title.add_child(label(view.name, 'aut-name'));
+        head.add_child(title);
+        const status = box(false, 'aut-service');
+        status.x_expand = true;
+        status.x_align = narrow ? Clutter.ActorAlign.START : Clutter.ActorAlign.END;
+        status.add_child(label(view.status, view.stale ? 'aut-meta aut-stale-text' : 'aut-meta'));
+        if (view.received != null) status.add_child(label('· ' + localTime(view.received) + ' 수신', 'aut-meta'));
+        head.add_child(status);
+        fullRow(head);
+
+        const notes = [];
+        const periods = new Set([...panelPeriods, ...view.windows.map(w => w.minutes)]);
+        for (const minutes of periods) {
+            const {value, resets, expired} = reading(view, minutes);
+            if (value === null) {
+                if (view.windows.length)
+                    notes.push(periodLabel(minutes) + (expired ? ' 초기화 후 새 값 대기' : ' 한도 미제공'));
+                continue;
+            }
+            layout.attach(label(periodLabel(minutes), 'aut-meter-period'), 0, row, 1, 1);
+            layout.attach(label(percent(value), 'aut-meter-number'), 1, row, 1, 1);
+            layout.attach(meter(value, key), 2, row, 1, 1);
+            const reset = label(resets == null ? '초기화 —' : localTime(resets) + ' 초기화', 'aut-meta aut-meter-reset');
+            reset.x_expand = false;
+            reset.x_align = Clutter.ActorAlign.END;
+            if (narrow) {
+                row++;
+                fullRow(reset);
+            } else {
+                layout.attach(reset, 3, row++, 1, 1);
+            }
+        }
+        if (notes.length) fullRow(label(notes.join(' · '), 'aut-meta aut-meter-note'));
+    }
+    return table;
+}
+
 export function usageTable(views, services, icons, mode) {
     const body = box(true, 'aut-sections');
     const layout = new Clutter.GridLayout({orientation: Clutter.Orientation.HORIZONTAL});
@@ -144,7 +227,7 @@ export function usageTable(views, services, icons, mode) {
     const periods = [...new Set([...panelPeriods, ...views.flatMap(v => v.windows.map(w => w.minutes))])];
     const transpose = mode === 'stacked';
     const put = (actor, x, y) => layout.attach(actor, transpose ? y : x, transpose ? x : y, 1, 1);
-    periods.forEach((m, i) => put(periodTitle(m, true), i + 1, 0));
+    periods.forEach((m, i) => put(periodTitle(m), i + 1, 0));
     views.forEach((v, index) => {
         const key = services[index][0];
         put(provider(icons[key], key, v), 0, index + 1);

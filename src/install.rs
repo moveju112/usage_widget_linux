@@ -61,13 +61,13 @@ fn bytes(path: &Path) -> io::Result<Option<Vec<u8>>> {
         Err(e) => Err(e),
     }
 }
-fn remove_file(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_file(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         result => result,
     }
 }
-fn shell_quote(path: &Path) -> String {
+pub(crate) fn shell_quote(path: &Path) -> String {
     let s = path.to_string_lossy();
     if s.bytes()
         .all(|b| b.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&b))
@@ -111,7 +111,11 @@ impl Wrapper {
 }
 fn wrappers(dest: &Path) -> [Wrapper; 2] {
     [
-        Wrapper::new(shell_quote(&dest.join("ai-usage-tray"))),
+        Wrapper::new(if dest == crate::relay::sender_dir() {
+            format!("{} sender", shell_quote(&dest.join("ai-usage-tray")))
+        } else {
+            shell_quote(&dest.join("ai-usage-tray"))
+        }),
         Wrapper::new(format!(
             "/usr/bin/python3 -B {}",
             shell_quote(&dest.join("collector.py"))
@@ -142,7 +146,9 @@ fn wrap(data: &mut Value, exists: bool, dest: &Path) -> io::Result<bool> {
         .as_str()
         .filter(|_| sl["type"] == "command")
         .ok_or_else(|| io::Error::other("기존 statusLine 형식을 보존할 수 없어."))?;
-    if new.parse(cmd).is_some() {
+    if new.parse(cmd).is_some()
+        || matches!(other_wrapper(dest).parse(cmd), Some(Original::Command(inner)) if new.parse(inner).is_some())
+    {
         return Ok(false);
     }
     let original = match old.parse(cmd) {
@@ -157,7 +163,37 @@ fn wrap(data: &mut Value, exists: bool, dest: &Path) -> io::Result<bool> {
     sl["command"] = new.encode(original).into();
     Ok(true)
 }
+fn other_wrapper(dest: &Path) -> Wrapper {
+    let other = if dest == crate::relay::sender_dir() {
+        destination()
+    } else {
+        crate::relay::sender_dir()
+    };
+    wrappers(&other).into_iter().next().unwrap()
+}
 fn unwrap(data: &mut Value, dest: &Path) -> io::Result<(bool, bool)> {
+    let other = other_wrapper(dest);
+    if let Some(Original::Command(inner)) = data["statusLine"]["command"]
+        .as_str()
+        .and_then(|s| other.parse(s))
+    {
+        let mut nested = data.clone();
+        nested["statusLine"]["command"] = inner.into();
+        let (changed, remove) = unwrap_direct(&mut nested, dest)?;
+        if changed {
+            let restored = match nested["statusLine"]["command"].as_str() {
+                Some(command) => Original::Command(command),
+                None if remove => Original::Absent("created"),
+                None if nested.get("statusLine").is_some() => Original::Absent("null"),
+                None => Original::Absent("absent"),
+            };
+            data["statusLine"]["command"] = other.encode(restored).into();
+        }
+        return Ok((changed, false));
+    }
+    unwrap_direct(data, dest)
+}
+fn unwrap_direct(data: &mut Value, dest: &Path) -> io::Result<(bool, bool)> {
     let Some(cmd) = data["statusLine"]["command"].as_str() else {
         return Ok((false, false));
     };
@@ -235,6 +271,22 @@ impl Settings {
         payload.push(b'\n');
         atomic(&target, &payload, mode)
     }
+}
+
+pub(crate) fn sender_hook(dest: &Path, enable: bool) -> io::Result<()> {
+    let mut config = Settings::load(dest)?;
+    let (changed, remove) = if enable {
+        (
+            wrap(&mut config.data, config.original.is_some(), dest)?,
+            false,
+        )
+    } else {
+        unwrap(&mut config.data, dest)?
+    };
+    if changed {
+        config.write(remove)?;
+    }
+    Ok(())
 }
 
 fn files() -> impl Iterator<Item = &'static str> {
@@ -481,6 +533,8 @@ fn uninstall(dest: &Path, mut config: Settings) -> io::Result<()> {
     if state.is_dir() {
         remove_file(&state.join("claude.json"))?;
         remove_file(&state.join("capture.lock"))?;
+        remove_file(&state.join("claude-remote.json"))?;
+        remove_file(&state.join("receive.lock"))?;
         let _ = fs::remove_dir(state);
     }
     let config = crate::schedule::config_dir();

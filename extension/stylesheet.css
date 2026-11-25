@@ -20,12 +20,20 @@
 .aut-track { height: 4px; border-radius: 2px; background-color: rgba(128,128,128,0.5); }
 .aut-notice { padding-top: 8px; }
 .aut-fill-claude { background-color: #dc9476; border-radius: 2px; }
-.aut-fill-codex { background-color: #75b4b1; border-radius: 2px; }
+.aut-fill-codex { background-color: #adc9ea; border-radius: 2px; }
+.aut-meter-head { spacing: 6px; padding: 7px 0; }
+.aut-meter-period { min-width: 3em; padding-left: 6px; }
+.aut-meter-number { min-width: 3.4em; padding: 3px 10px 3px 4px; text-align: right; font-weight: bold; font-size: 1.25em; }
+.aut-meter-reset { padding-left: 12px; }
+.aut-meter-note { padding: 3px 0 5px 6px; }
+.aut-meters .aut-rule { margin: 6px 0 2px; }
+.aut-stale-text { font-weight: bold; }
 
 .aut-panel, .aut-service { spacing: 6px; }
-.aut-pairs { spacing: 8px; }
-.aut-pair, .aut-period-title { spacing: 3px; }
-.aut-period-title, .aut-small { font-size: 0.85em; }
+.aut-capsule { spacing: 4px; padding: 1px 6px; border-radius: 6px; background-color: rgba(128,128,128,0.18); }
+.aut-capsule-vertical { spacing: 1px; padding: 3px 0; text-align: center; }
+.aut-slash { font-weight: normal; color: #93969a; }
+.aut-period-title { spacing: 3px; font-size: 0.85em; }
 .aut-amount, .aut-cell-value { font-weight: bold; }
 .aut-stacked { font-family: monospace; }
 .aut-stack-period { padding-right: 2px; }

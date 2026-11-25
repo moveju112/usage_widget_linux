@@ -2,9 +2,10 @@
   "uuid": "ai-usage-tray@local",
   "name": "AI Usage Tray",
   "description": "현재 사용자의 Claude Code 및 Codex 한도를 GNOME 패널에 표시",
-  "version": 10,
-  "version-name": "0.7.0",
+  "version": 17,
+  "version-name": "0.14.0",
   "url": "https://github.com/moveju112/usage_widget_linux",
-  "shell-version": ["46"],
+  "shell-version": ["46", "50"],
+  "session-modes": ["user", "unlock-dialog"],
   "settings-schema": "org.gnome.shell.extensions.ai-usage-tray"
 }

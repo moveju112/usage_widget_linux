@@ -21,7 +21,7 @@ fn scope(profile: &Path, data: &Value) -> String {
     );
     format!("{:x}", hash.finalize())
 }
-fn windows(data: &Value, field: &str) -> Vec<Value> {
+pub(crate) fn windows(data: &Value, field: &str) -> Vec<Value> {
     [("five_hour", 300), ("seven_day", 10080)]
         .into_iter()
         .filter_map(|(key, minutes)| {
@@ -109,33 +109,64 @@ fn from_hook(data: &Value, profile: &str, at: f64) -> Option<Value> {
     sample["observed"] = json!(timestamp(&data["observed"]));
     Some(sample)
 }
-type Signature = (u64, i64, i64, u64);
-fn signature(path: &Path) -> Option<Signature> {
+pub(crate) type Signature = (u64, u64, i64, i64, u64);
+pub(crate) fn signature(path: &Path) -> Option<Signature> {
     let m = fs::metadata(path).ok()?;
-    Some((m.ino(), m.mtime(), m.mtime_nsec(), m.len()))
+    Some((m.dev(), m.ino(), m.mtime(), m.mtime_nsec(), m.len()))
 }
 #[derive(Default)]
 pub struct Reader {
     profile_version: Option<(PathBuf, Option<Signature>)>,
     hook_version: Option<(String, Option<Signature>)>,
     identity: String,
+    account: Option<String>,
+    remote_version: Option<Signature>,
+    remote: Option<Value>,
     local: Option<Value>,
     hook: Option<Value>,
 }
 impl Reader {
     pub fn read(&mut self, paths: &Paths) -> Value {
-        if paths.find_cli("claude").is_none() {
-            return empty("Claude Code", "missing");
-        }
         let at = now();
         let profile = paths.profile();
         let version = (profile.clone(), signature(&profile));
         if self.profile_version.as_ref() != Some(&version) {
             let data = json_file(&profile).unwrap_or_default();
             self.identity = scope(&profile, &data);
+            self.account = crate::relay::account_tag(&data);
             self.local = local(&data, at);
             self.profile_version = Some(version);
         }
+        let remote_path = cache().join("claude-remote.json");
+        let version = signature(&remote_path);
+        if self.remote_version != version {
+            self.remote = json_file(&remote_path);
+            self.remote_version = version;
+        }
+        let local = if paths.find_cli("claude").is_some() {
+            self.local_read(at)
+        } else {
+            empty("Claude Code", "missing")
+        };
+        let remote = self.remote.as_ref().filter(|v| {
+            self.account
+                .as_ref()
+                .is_none_or(|id| v["account"].as_str() == Some(id))
+        });
+        if let Some(remote) = remote
+            && (self.account.is_none() || remote["received"].as_f64() > local["received"].as_f64())
+        {
+            return snapshot(
+                "SSH",
+                remote["windows"].as_array().cloned().unwrap_or_default(),
+                remote["received"].as_f64(),
+                "ok",
+            );
+        }
+        local
+    }
+
+    fn local_read(&mut self, at: f64) -> Value {
         let hook = cache().join("claude.json");
         let version = (self.identity.clone(), signature(&hook));
         if self.hook_version.as_ref() != Some(&version) {

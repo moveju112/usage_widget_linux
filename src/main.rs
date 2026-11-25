@@ -3,6 +3,7 @@ mod cli;
 mod codex;
 mod common;
 mod install;
+mod relay;
 mod schedule;
 mod update;
 
@@ -130,12 +131,32 @@ fn run() -> io::Result<()> {
     let paths = Paths::load();
     let action = env::args().nth(1).unwrap_or_default();
     match action.as_str() {
-        "capture" | "forward" => {
+        "sender-install" => relay::install(&paths, &env::args_os().skip(2).collect::<Vec<_>>()),
+        "sender-uninstall" => relay::uninstall(),
+        "sender-flush" => relay::flush(),
+        "receiver-key" => relay::receiver_key(),
+        "receive" => relay::receive(&paths, &env::args().nth(2).unwrap_or_default()),
+        "sender" | "capture" | "forward" => {
+            let sending = action == "sender";
+            let mode = if sending {
+                env::args().nth(2).unwrap_or_default()
+            } else {
+                action
+            };
+            if !matches!(mode.as_str(), "capture" | "forward") {
+                return Err(io::Error::other(
+                    "sender capture 또는 sender forward가 필요해.",
+                ));
+            }
             let at = now();
             let mut raw = Vec::new();
             io::stdin().read_to_end(&mut raw)?;
-            let _ = claude::capture(&paths, &raw, at);
-            if action == "forward" {
+            if sending {
+                let _ = relay::enqueue(&paths, &raw, at);
+            } else {
+                let _ = claude::capture(&paths, &raw, at);
+            }
+            if mode == "forward" {
                 io::stdout().write_all(&raw)?;
             }
             Ok(())
@@ -154,7 +175,7 @@ fn run() -> io::Result<()> {
         "apply-update" => install::apply_update(&env::args().nth(2).unwrap_or_default()),
         "install" | "start" | "uninstall" => install::run(&action),
         _ => Err(io::Error::other(
-            "사용법: ai-usage-tray install | start | uninstall | check-update | update | once | serve | capture | forward",
+            "사용법: ai-usage-tray install | start | uninstall | check-update | update | once | serve | capture | forward | sender-install SSH_HOST KEY | sender-uninstall | receiver-key",
         )),
     }
 }

@@ -49,6 +49,8 @@ jobs:
           test "$(uname -m)" = "$RELEASE_ARCH"
           cargo test --locked
           gjs -m tests/test_display.js
+          glib-compile-schemas --strict --targetdir="$RUNNER_TEMP" extension/schemas
+          GSETTINGS_BACKEND=memory GSETTINGS_SCHEMA_DIR="$RUNNER_TEMP" gjs -m tests/test_updates.js
           cargo build --release --locked
           test "v$(./target/release/ai-usage-tray --version)" = "$RELEASE_TAG"
           mkdir dist

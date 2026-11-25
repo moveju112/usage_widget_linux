@@ -53,6 +53,10 @@ export default class Preferences extends ExtensionPreferences {
         }
         const updates = new Adw.PreferencesGroup();
         page.add(updates);
+        const automatic = new Adw.SwitchRow({title: '자동 업데이트',
+            subtitle: '30분마다 새 버전을 확인하고 설치해.'});
+        settings.bind('auto-update', automatic, 'active', Gio.SettingsBindFlags.DEFAULT);
+        updates.add(automatic);
         const update = new Adw.ActionRow({title: '프로그램 업데이트', activatable: true, use_markup: false});
         update.add_suffix(new Gtk.Image({icon_name: 'software-update-available-symbolic'}));
         update.connect('activated', () => actions.activate_action('update', null));

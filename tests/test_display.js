@@ -1,4 +1,4 @@
-import {present, percent, periodLabel, reading} from '../extension/display.js';
+import {inlineAmounts, present, percent, periodLabel, reading} from '../extension/display.js';
 function equal(actual, expected) {
     if (actual !== expected) throw Error(JSON.stringify({actual, expected}));
 }
@@ -29,4 +29,11 @@ equal(reading(show([win(10080,23)],now-1800),10080).text, '23%*');
 equal(reading(show([win(15,15)]),300).value, null);
 equal(periodLabel(10080), '7일');
 equal(reading(present({status:'error'},now,'Codex'),10080).text, '—');
+equal(inlineAmounts(mixed).join(' / '), '0% / 68%');
+equal(inlineAmounts(show([win(10080,88)])).join(' / '), '88%');
+equal(inlineAmounts(show([win(300,0)])).join(' / '), '0%');
+equal(inlineAmounts(show([win(10080,0),win(300,14,now)])).join(' / '), '0%');
+equal(inlineAmounts(show([win(300,5),win(10080,19)],now-1800)).join(' / '), '5% / 19%');
+equal(inlineAmounts(show([win(10080,88,now)])).length, 0);
+equal(inlineAmounts(present({status:'waiting'},now,'Claude')).length, 0);
 print('표시 상태 검증 통과');

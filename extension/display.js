@@ -39,7 +39,7 @@ export function present(data, now, service) {
 }
 
 export const panelStyles = {inline: '1안 · 한 줄형', stacked: '2안 · 두 줄형', rings: '3안 · 이중 링형'};
-export const detailStyles = {auto: '패널 방식에 맞춤', list: '목록형', meters: '막대형', columns: '나란히 비교'};
+export const detailStyles = {auto: '패널 방식에 맞춤', list: '목록형', meters: '서비스별 게이지', columns: '나란히 비교'};
 export const panelPeriods = [300, 10080];
 
 export function periodLabel(minutes) {
@@ -51,4 +51,9 @@ export function reading(view, minutes) {
     const value = w && !w.expired ? w.percent : null;
     const text = value === null ? '—' : percent(value) + (view.stale ? '*' : '');
     return {value, text, resets: w?.resets, expired: w?.expired ?? false};
+}
+
+export function inlineAmounts(view) {
+    return panelPeriods.map(minutes => reading(view, minutes).value)
+        .filter(value => value !== null).map(percent);
 }

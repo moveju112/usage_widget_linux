@@ -7,7 +7,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {panelPeriods, periodLabel, present, reading} from './display.js';
-import {box, label, localTime, panelService, usageTable} from './usageView.js';
+import {box, label, localTime, panelService, setBoxVertical, usageMeters, usageTable} from './usageView.js';
 
 import {Updates} from './updates.js';
 import {actionPath, textState} from './settings.js';
@@ -21,19 +21,6 @@ function menuButton(name, icon) {
     return new St.Button({style_class: 'icon-button flat', accessible_name: name,
         can_focus: true, track_hover: true,
         child: new St.Icon({icon_name: icon, icon_size: 18})});
-}
-function meter(fraction, key) {
-    const width = 85;
-    const track = box(false, 'aut-track');
-    track.x_align = Clutter.ActorAlign.START;
-    track.y_align = Clutter.ActorAlign.CENTER;
-    track.set_style('width: ' + width + 'px;');
-    if (fraction != null && fraction > 0) {
-        const fill = new St.Widget({style_class: 'aut-fill-' + key});
-        fill.set_style('width: ' + Math.max(1, Math.round(width * fraction / 100)) + 'px;');
-        track.add_child(fill);
-    }
-    return track;
 }
 
 export default class AIUsageTray extends Extension {
@@ -89,6 +76,10 @@ export default class AIUsageTray extends Extension {
         this._button.menu.connect('open-state-changed', (_menu, open) => {
             if (open) this._render(true);
         });
+        // The lock screen keeps this extension enabled so the worker survives. Only the panel item hides.
+        this._sessionUpdated = Main.sessionMode.connect('updated', () => this._lockChanged());
+        this._locked = false;
+        this._lockChanged();
         this._render(true);
         this._start();
         this._ticker = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
@@ -172,7 +163,17 @@ export default class AIUsageTray extends Extension {
         return edge < 8 && end > 8;
     }
 
+    _lockChanged() {
+        const locked = Main.sessionMode.isLocked;
+        if (locked === this._locked) return;
+        this._locked = locked;
+        this._button.container.visible = !locked;
+        if (locked) this._button.menu.close();
+        else this._render(true);
+    }
+
     _render(force) {
+        if (this._locked) return;
         const now = Date.now() / 1000;
         const views = names.map(([key, name]) => present(this._state[key], now, name));
         const layout = this._settings.get_string('layout');
@@ -180,18 +181,20 @@ export default class AIUsageTray extends Extension {
         const mode = this._settings.get_string('panel-style');
         const scale = St.ThemeContext.get_for_stage(global.stage).scale_factor;
         const monitor = Main.layoutManager.findMonitorForActor(this._button) ?? Main.layoutManager.primaryMonitor;
-        const narrow = monitor && monitor.width / scale < 530;
+        const screenWidth = monitor ? monitor.width / scale : 800;
+        const narrow = screenWidth < (layout === 'meters' ? 500 : 530);
+        const meterContentWidth = Math.max(0, Math.min(438, screenWidth - 60));
         const cross = vertical ? this._button.width : this._button.height;
         const thickness = Math.round((cross > 0 ? cross : Main.panel.height || 32 * scale) / scale);
-        const signature = JSON.stringify([views, this._state.notice, this._state.schedule, this._state.claudeSchedule, mode, layout, vertical, thickness, narrow,
+        const signature = JSON.stringify([views, this._state.notice, this._state.schedule, this._state.claudeSchedule, mode, layout, vertical, thickness, narrow, meterContentWidth,
             GLib.DateTime.new_now_local().format('%F %z')]);
         if (!force && signature === this._previous) return;
         this._previous = signature;
         this._strip.destroy_all_children();
-        this._strip.vertical = vertical;
+        setBoxVertical(this._strip, vertical);
         for (const [i, view] of views.entries()) {
             const key = names[i][0];
-            if (i) this._strip.add_child(new St.Widget({style_class: vertical ? 'aut-rule' : 'aut-separator',
+            if (i && mode !== 'inline') this._strip.add_child(new St.Widget({style_class: vertical ? 'aut-rule' : 'aut-separator',
                 y_align: Clutter.ActorAlign.CENTER}));
             this._strip.add_child(panelService(this._icons[key], key, view, mode, vertical, thickness));
         }
@@ -200,14 +203,16 @@ export default class AIUsageTray extends Extension {
         this._body?.destroy();
         // Extra nonstandard windows grow vertically instead of overflowing narrow displays.
         const standard = views.every(v => v.windows.every(w => panelPeriods.includes(w.minutes)));
-        if (layout === 'auto' && !narrow && (standard || mode === 'stacked')) {
+        if (layout === 'meters') {
+            this._body = usageMeters(views, names, this._icons, narrow, meterContentWidth);
+        } else if (layout === 'auto' && !narrow && (standard || mode === 'stacked')) {
             this._body = usageTable(views, names, this._icons, mode);
         } else {
             const columns = layout === 'columns' && !narrow;
             this._body = box(!columns, columns ? 'aut-columns' : 'aut-sections');
             for (const [i, view] of views.entries()) {
                 if (i) this._body.add_child(new St.Widget({style_class: columns ? 'aut-vrule' : 'aut-rule'}));
-                this._body.add_child(this._section(view, names[i][0], layout, columns, narrow));
+                this._body.add_child(this._section(view, columns, narrow));
             }
         }
         this._content.actor.insert_child_at_index(this._body, 1);
@@ -236,7 +241,7 @@ export default class AIUsageTray extends Extension {
         this._actions.lookup_action('refresh').set_state(textState(this._notice.text));
     }
 
-    _section(view, key, layout, columns, narrow) {
+    _section(view, columns, narrow) {
         const group = box(true, 'aut-section');
         const head = box(false, 'aut-heading');
         head.add_child(label(view.name, 'aut-name'));
@@ -254,7 +259,6 @@ export default class AIUsageTray extends Extension {
             if (!columns && !narrow) row.add_child(spacer());
             row.add_child(label(reset, 'aut-meta'));
             group.add_child(row);
-            if (layout === 'meters' && w && !w.expired) group.add_child(meter(w.percent, key));
         }
         group.add_child(label('마지막 수신 ' + localTime(view.received), 'aut-meta aut-received'));
         return group;
@@ -269,6 +273,7 @@ export default class AIUsageTray extends Extension {
         this._updates.destroy();
         this._updates = this._actions = null;
         this._settings.disconnect(this._settingsChanged);
+        Main.sessionMode.disconnect(this._sessionUpdated);
         this._button?.destroy();
         this._button = this._body = this._settings = this._state = null;
         this._strip = this._legend = this._icons = this._notice = this._content = null;

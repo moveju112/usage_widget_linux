@@ -1,6 +1,7 @@
 import Adw from 'gi://Adw';
 import Gio from 'gi://Gio';
 import {addEventSource} from './eventPrefs.js';
+import {addVmHosts} from './vmPrefs.js';
 import Gtk from 'gi://Gtk';
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 import {panelStyles, detailStyles} from './display.js';
@@ -35,6 +36,7 @@ export default class Preferences extends ExtensionPreferences {
             }));
         }
         addEventSource(page, window);
+        addVmHosts(page, window, this.dir.get_child('ai-usage-tray').get_path());
         const schedules = new Adw.PreferencesGroup({title: '예약 창'});
         page.add(schedules);
         const actions = Gio.DBusActionGroup.get(Gio.DBus.session, 'org.gnome.Shell', actionPath);

@@ -22,6 +22,7 @@ const ASSETS: &[(&str, &[u8])] = &[
         "eventPrefs.js",
         include_bytes!("../extension/eventPrefs.js"),
     ),
+    ("vmPrefs.js", include_bytes!("../extension/vmPrefs.js")),
     ("prefs.js", include_bytes!("../extension/prefs.js")),
     ("settings.js", include_bytes!("../extension/settings.js")),
     (

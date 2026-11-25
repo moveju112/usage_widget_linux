@@ -21,8 +21,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - { runner: ubuntu-24.04, arch: x86_64 }
-          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+          # Built against the oldest supported glibc (2.35) so the binary also runs on newer releases.
+          - { runner: ubuntu-22.04, arch: x86_64 }
+          - { runner: ubuntu-22.04-arm, arch: aarch64 }
     runs-on: ${{ matrix.runner }}
     env:
       RUSTUP_TOOLCHAIN: 1.93.0
@@ -48,9 +49,6 @@ jobs:
         run: |
           test "$(uname -m)" = "$RELEASE_ARCH"
           cargo test --locked
-          gjs -m tests/test_display.js
-          glib-compile-schemas --strict --targetdir="$RUNNER_TEMP" extension/schemas
-          GSETTINGS_BACKEND=memory GSETTINGS_SCHEMA_DIR="$RUNNER_TEMP" gjs -m tests/test_updates.js
           cargo build --release --locked
           test "v$(./target/release/ai-usage-tray --version)" = "$RELEASE_TAG"
           mkdir dist
@@ -60,8 +58,23 @@ jobs:
           name: ai-usage-tray-linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
+  # The panel code runs on GNOME 46 and later, so its tests use that release's gjs.
+  ui:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - name: Test the extension modules
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gjs gnome-shell-common libglib2.0-bin
+          gjs -m tests/test_display.js
+          glib-compile-schemas --strict --targetdir="$RUNNER_TEMP" extension/schemas
+          GSETTINGS_BACKEND=memory GSETTINGS_SCHEMA_DIR="$RUNNER_TEMP" gjs -m tests/test_updates.js
   publish:
-    needs: build
+    needs: [build, ui]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

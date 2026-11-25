@@ -1160,6 +1160,171 @@ fn ssh_sender_outbox_and_receiver_account_isolation() {
 }
 
 #[test]
+fn main_pc_pulls_vm_cli_usage_over_ssh() {
+    use std::os::unix::fs::MetadataExt;
+    let pc = User::new();
+    let vm_profile = pc.path("vm.json");
+    let log = pc.path("ssh.log");
+    // Stands in for the VM: the last word of the remote command is the signature seen last time.
+    pc.fake(
+        "ssh",
+        &format!(
+            "echo \"$*\" >> '{log}'\n[ -f '{vm}' ] || exit 255\nfor a; do last=$a; done\nlast=${{last##* }}\ns=$(stat -c %Y.%s.%i '{vm}')\n[ \"$s\" = \"$last\" ] && {{ echo same; exit 0; }}\necho \"$s\"; cat '{vm}'",
+            log = log.display(),
+            vm = vm_profile.display()
+        ),
+    );
+    fs::write(
+        pc.path("home/.claude.json"),
+        r#"{"oauthAccount":{"accountUuid":"fixture-account"}}"#,
+    )
+    .unwrap();
+    let run = |args: &[&str]| pc.command(BIN).args(args).output().unwrap();
+    let listed = || String::from_utf8(run(&["vm-list"]).stdout).unwrap();
+    let remote = pc.path("cache/ai-usage-tray/claude-remote.json");
+
+    assert!(!run(&["vm-add", "ubuntu@vm1"]).status.success());
+    assert!(!run(&["vm-test", "ubuntu@vm1"]).status.success());
+    assert!(!run(&["vm-add", "-oProxyCommand=x"]).status.success());
+    assert_eq!(listed().trim(), "등록된 VM이 없어.");
+    let status =
+        || load(&pc.path("cache/ai-usage-tray/claude-vm-status.json"))["ubuntu@vm1"].clone();
+    assert!(status().is_null());
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let profile = |account: &str, percent: u32, fetched: u64| {
+        json!({
+            "oauthAccount":{"accountUuid":account,"emailAddress":"private-fixture@example.com"},
+            "projects":{"/private-fixture":{"history":["private-fixture"]}},
+            "cachedUsageUtilization":{"accountUuid":account,"fetchedAtMs":fetched,"utilization":{
+                "five_hour":{"utilization":percent,"resets_at":"2039-01-01T00:00:00+00:00"},
+                "seven_day":{"utilization":24,"resets_at":"2039-01-02T00:00:00+00:00"}}}
+        })
+        .to_string()
+    };
+    fs::write(&vm_profile, profile("other-account", 99, now - 60_000)).unwrap();
+    assert!(run(&["vm-add", "ubuntu@vm1"]).status.success());
+    assert!(!remote.exists());
+    assert_eq!(status()["status"], "rejected");
+    assert_eq!(pc.state()["claude"]["status"], "waiting");
+
+    fs::write(&vm_profile, profile("fixture-account", 58, now - 60_000)).unwrap();
+    let added = run(&["vm-add", "ubuntu@vm1"]);
+    assert!(
+        String::from_utf8_lossy(&added.stdout).contains("5시간 58% · 7일 24%"),
+        "{added:?}"
+    );
+    assert_eq!(listed().trim(), "ubuntu@vm1");
+    let tested = run(&["vm-test", "ubuntu@vm1"]);
+    assert!(String::from_utf8_lossy(&tested.stdout).starts_with("5시간 58% · 7일 24%"));
+    assert_eq!(listed().trim(), "ubuntu@vm1");
+    let recorded = status();
+    assert_eq!(recorded["status"], "ok");
+    assert_eq!(recorded["text"], "5시간 58% · 7일 24%");
+    let shown = pc.state()["claude"].clone();
+    assert_eq!(recorded["received"], shown["received"]);
+    assert_eq!(shown["source"], "SSH");
+    assert_eq!(shown["windows"][0]["percent"], 58);
+    assert_eq!(shown["windows"][1]["percent"], 24);
+    assert_eq!(
+        shown["received"].as_f64().unwrap(),
+        (now - 60_000) as f64 / 1000.0
+    );
+    for dir in ["cache/ai-usage-tray", "home/.config/ai-usage-tray"] {
+        for entry in fs::read_dir(pc.path(dir)).unwrap() {
+            let text =
+                String::from_utf8_lossy(&fs::read(entry.unwrap().path()).unwrap()).into_owned();
+            assert!(!text.contains("fixture-account") && !text.contains("private-fixture"));
+        }
+    }
+
+    fs::remove_file(&remote).unwrap();
+    let mut tray = pc
+        .command(BIN)
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut pipe = tray.stdin.take().unwrap();
+    let out = tray.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            if tx
+                .send(serde_json::from_str::<Value>(&line).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let percent = |expected: u32| {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let state = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if state["claude"]["source"] == "SSH"
+                && state["claude"]["windows"][0]["percent"] == expected
+            {
+                return;
+            }
+        }
+    };
+    percent(58);
+    fs::write(&vm_profile, profile("fixture-account", 7, now - 30_000)).unwrap();
+    pipe.write_all(b"refresh\n").unwrap();
+    percent(7);
+
+    let calls = || fs::read_to_string(&log).unwrap().lines().count();
+    let (before, stored, checked) = (
+        calls(),
+        fs::read(&remote).unwrap(),
+        status()["checked"].clone(),
+    );
+    pipe.write_all(b"refresh\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while calls() == before {
+        assert!(Instant::now() < deadline, "refresh did not reach the VM");
+        thread::sleep(Duration::from_millis(50));
+    }
+    let meta = fs::metadata(&vm_profile).unwrap();
+    let signature = format!(" {}.{}.{}", meta.mtime(), meta.len(), meta.ino());
+    let text = fs::read_to_string(&log).unwrap();
+    assert!(text.lines().last().unwrap().ends_with(&signature), "{text}");
+    assert_eq!(stored, fs::read(&remote).unwrap());
+    // An unchanged profile still counts as a successful check of this VM.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while status()["checked"].as_f64() <= checked.as_f64() {
+        assert!(
+            Instant::now() < deadline,
+            "the unchanged read was not recorded"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(status()["status"], "ok");
+
+    let start = Instant::now();
+    drop(pipe);
+    assert!(tray.wait().unwrap().success());
+    assert!(start.elapsed() < Duration::from_secs(3));
+    // A registered VM that stops answering stays registered and keeps its last record time.
+    let last = status()["received"].clone();
+    fs::remove_file(&vm_profile).unwrap();
+    assert!(!run(&["vm-add", "ubuntu@vm1"]).status.success());
+    assert_eq!(listed().trim(), "ubuntu@vm1");
+    assert_eq!(status()["status"], "unreachable");
+    assert_eq!(status()["received"], last);
+    assert!(run(&["vm-remove", "ubuntu@vm1"]).status.success());
+    assert_eq!(listed().trim(), "등록된 VM이 없어.");
+    assert!(status().is_null());
+}
+
+#[test]
 fn headless_and_desktop_hooks_can_be_removed_in_either_order() {
     for desktop_first in [true, false] {
         for remove_desktop in [true, false] {

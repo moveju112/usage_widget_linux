@@ -82,12 +82,7 @@ pub fn install(paths: &Paths, args: &[OsString]) -> io::Result<()> {
     };
     let host = host
         .to_str()
-        .filter(|s| {
-            !s.is_empty()
-                && !s.starts_with('-')
-                && s.bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"-._@:[]".contains(&c))
-        })
+        .filter(|s| valid_host(s))
         .ok_or_else(|| io::Error::other("SSH 호스트 또는 user@host를 입력해줘."))?;
     let key = fs::canonicalize(key)?;
     if !key.is_file() {

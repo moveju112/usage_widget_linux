@@ -16,7 +16,7 @@ chmod u+x "$file"
 
 ## VM·서버 연결 (Sender)
 
-다른 VM이나 서버에서 쓴 Claude 사용량을 메인 PC 패널에 보여줍니다. VM에는 GNOME이 필요 없습니다.
+다른 VM이나 서버에서 쓴 Claude 사용량을 메인 PC 패널에 보여줍니다. VM에는 GNOME이 필요 없습니다. VM은 Ubuntu 22.04 이상(glibc 2.35 이상)에서 실행됩니다.
 
 **1. VM에서 실행합니다.** `user@main-pc`는 메인 PC의 SSH 계정과 주소로 바꾸세요.
 
@@ -49,6 +49,28 @@ install -d -m 700 ~/.ssh
 **3. VM에서 평소처럼 Claude Code를 사용합니다.** VM과 메인 PC의 시계가 맞아야 합니다.
 
 연결을 끊으려면 VM에서 `./ai-usage-tray sender-uninstall`을 실행하고, 메인 PC의 `~/.ssh/authorized_keys`에서 `ai-usage-tray-sender`로 끝나는 해당 줄을 지우세요.
+
+## VM·서버에서 가져오기 (Pull)
+
+VM에 아무것도 설치하지 않고, 메인 PC가 SSH로 VM의 Claude Code 사용량 기록을 읽어 옵니다. VM이 메인 PC로 접속할 수 없을 때 쓰세요.
+
+메인 PC에서 실행하세요. `user@vm`은 VM의 SSH 계정과 주소, 또는 `~/.ssh/config`의 별칭으로 바꾸세요.
+
+```bash
+tray="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/ai-usage-tray@local/ai-usage-tray"
+ssh -oBatchMode=yes user@vm true   # 비밀번호 없이 접속되는지 확인
+"$tray" vm-add user@vm
+"$tray" vm-test user@vm   # 접속과 현재 값 확인
+"$tray" vm-list
+"$tray" vm-remove user@vm
+```
+
+**트레이 설정 → VM에서 가져오기**에서도 호스트를 추가·삭제하고 **테스트** 버튼으로 접속을 확인할 수 있습니다.
+
+- 메인 PC의 SSH 키와 설정을 그대로 씁니다. 비밀번호를 물어야 하는 호스트는 등록되지 않습니다.
+- 트레이가 60초마다, 그리고 새로고침을 누를 때 읽어 옵니다. VM의 기록이 바뀌지 않았으면 다시 내려받지 않습니다.
+- Claude Code가 VM의 `~/.claude.json`에 스스로 남기는 사용량 기록을 읽습니다. 이 기록은 응답마다 갱신되지 않고, VM에 따라 아예 없을 수 있습니다. 응답마다 최신 값이 필요하면 위의 Sender를 쓰세요.
+- 메인 PC와 같은 Claude 계정의 값만 표시합니다. 프로필 내용은 저장하지 않고 사용률·초기화 시각·기록 시각만 남깁니다. VM과 메인 PC의 시계가 맞아야 합니다.
 
 ## 참고: 별도 코딩 에이전트를 쓰는 경우 (claude.json)
 

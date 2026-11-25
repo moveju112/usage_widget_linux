@@ -290,7 +290,9 @@ fn slow_query_and_manual_refresh() {
             }
         }
     };
-    assert_eq!(receive(|_| true)["codex"]["status"], "loading");
+    let initial = receive(|_| true);
+    assert_eq!(initial["codex"]["status"], "loading");
+    assert_eq!(initial["version"], env!("CARGO_PKG_VERSION"));
     u.capture(br#"{"rate_limits":{"five_hour":{"used_percentage":0}}}"#);
     pipe.write_all(b"refresh\n").unwrap();
     let first = receive(|state| state["claude"]["windows"][0]["percent"] == 0);

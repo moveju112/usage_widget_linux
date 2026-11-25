@@ -59,16 +59,22 @@ export default class Preferences extends ExtensionPreferences {
             subtitle: '30분마다 새 버전을 확인하고 설치해.'});
         settings.bind('auto-update', automatic, 'active', Gio.SettingsBindFlags.DEFAULT);
         updates.add(automatic);
-        const update = new Adw.ActionRow({title: '프로그램 업데이트', activatable: true, use_markup: false});
-        update.add_suffix(new Gtk.Image({icon_name: 'software-update-available-symbolic'}));
-        update.connect('activated', () => actions.activate_action('update', null));
-        updates.add(update);
-        rows.set('update', update);
+        const buttons = [['update', '프로그램 업데이트', 'software-update-available-symbolic'],
+            ['restart', '사용량 수집 다시 시작', 'view-refresh-symbolic']];
+        for (const [key, title, icon_name] of buttons) {
+            const row = new Adw.ActionRow({title, activatable: true, use_markup: false});
+            row.add_suffix(new Gtk.Image({icon_name}));
+            row.connect('activated', () => actions.activate_action(key, null));
+            updates.add(row);
+            rows.set(key, row);
+        }
         const sync = () => {
             for (const [key, row] of rows) {
                 const state = actions.get_action_state(key);
-                row.subtitle = state?.deepUnpack() ?? '패널 실행 대기';
-                if (key === 'update')
+                // A panel loaded before this button existed still exports its other actions.
+                row.subtitle = state?.deepUnpack() ?? (key === 'restart' && actions.has_action('update')
+                    ? '다시 로그인한 뒤 사용할 수 있어.' : '패널 실행 대기');
+                if (buttons.some(([name]) => name === key))
                     row.sensitive = actions.get_action_enabled(key);
             }
         };

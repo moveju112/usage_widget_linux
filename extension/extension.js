@@ -66,6 +66,9 @@ export default class AIUsageTray extends Extension {
         const refresh = Gio.SimpleAction.new_stateful('refresh', null, textState(''));
         refresh.connect('activate', () => this._refresh());
         this._actions.add_action(refresh);
+        const restart = Gio.SimpleAction.new_stateful('restart', null, textState('수집 시작 중'));
+        restart.connect('activate', () => this._restart());
+        this._actions.add_action(restart);
         for (const [key] of names) {
             const status = Gio.SimpleAction.new_stateful(key, null, textState('예약 상태 확인 중'));
             status.set_enabled(false);
@@ -96,6 +99,7 @@ export default class AIUsageTray extends Extension {
             const flags = Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE |
                           Gio.SubprocessFlags.STDERR_SILENCE;
             this._process = Gio.Subprocess.new([this.path + '/ai-usage-tray', 'serve'], flags);
+            this._started = Date.now() / 1000;
             this._input = this._process.get_stdin_pipe();
             const lines = new Gio.DataInputStream({base_stream: this._process.get_stdout_pipe()});
             const read = () => lines.read_line_async(GLib.PRIORITY_DEFAULT, cancel, (stream, result) => {
@@ -136,6 +140,16 @@ export default class AIUsageTray extends Extension {
         this._input = null;
         this._process = null;
         this._writing = false;
+    }
+
+    // Closing stdin lets the worker exit cleanly. The new one runs the binary on disk,
+    // so an installed update reaches collection and schedules without logging out.
+    _restart() {
+        if (this._retry) GLib.source_remove(this._retry);
+        this._retry = 0;
+        this._stopWorker();
+        this._start();
+        this._render(true);
     }
 
     _refresh() {
@@ -186,7 +200,7 @@ export default class AIUsageTray extends Extension {
         const meterContentWidth = Math.max(0, Math.min(438, screenWidth - 60));
         const cross = vertical ? this._button.width : this._button.height;
         const thickness = Math.round((cross > 0 ? cross : Main.panel.height || 32 * scale) / scale);
-        const signature = JSON.stringify([views, this._state.notice, this._state.schedule, this._state.claudeSchedule, mode, layout, vertical, thickness, narrow, meterContentWidth,
+        const signature = JSON.stringify([views, this._state.notice, this._state.schedule, this._state.claudeSchedule, this._state.version, this._started, Boolean(this._process), mode, layout, vertical, thickness, narrow, meterContentWidth,
             GLib.DateTime.new_now_local().format('%F %z')]);
         if (!force && signature === this._previous) return;
         this._previous = signature;
@@ -217,10 +231,12 @@ export default class AIUsageTray extends Extension {
         }
         this._content.actor.insert_child_at_index(this._body, 1);
         this._legend.visible = mode === 'rings';
+        let calling = false;
         const statuses = {off: '꺼짐', running: '호출 중', consent_required: '일시 중지 · 예약 설정에서 약관 안내에 동의해.',
             error: '예약 설정이나 기록을 읽을 수 없어.'};
         for (const [key, name] of names) {
             const schedule = this._state[key === 'claude' ? 'claudeSchedule' : 'schedule'];
+            calling ||= schedule?.status === 'running';
             const step = entry => entry?.total > 1 ? ' · ' + entry.ordinal + '/' + entry.total + '회' : '';
             let description = schedule?.next
                 ? '다음 ' + localTime(schedule.next, schedule.total > 1) + step(schedule) + ' · ' + schedule.model
@@ -239,6 +255,12 @@ export default class AIUsageTray extends Extension {
         this._notice.text = this._state.notice ?? '';
         this._notice.visible = Boolean(this._state.notice);
         this._actions.lookup_action('refresh').set_state(textState(this._notice.text));
+        // An interrupted scheduled call is never replayed, so restarting waits for it to finish.
+        const restart = this._actions.lookup_action('restart');
+        restart.set_enabled(!calling);
+        restart.set_state(textState(calling ? '예약 호출 중 · 끝나면 다시 시작할 수 있어.'
+            : !this._process ? '수집 중지됨 · 누르면 다시 시작해.'
+                : (this._state.version ? 'v' + this._state.version + ' · ' : '') + localTime(this._started, true) + ' 시작'));
     }
 
     _section(view, columns, narrow) {

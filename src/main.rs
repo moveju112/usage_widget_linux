@@ -39,7 +39,7 @@ fn publish(state: &Value) -> io::Result<()> {
 }
 fn serve(paths: Arc<Paths>) -> io::Result<()> {
     let mut reader = claude::Reader::default();
-    let mut state = json!({"claude":reader.read(&paths),"codex":empty("app-server","loading"),"notice":"","schedule":{"status":"off"},"claudeSchedule":{"status":"off"}});
+    let mut state = json!({"version":env!("CARGO_PKG_VERSION"),"claude":reader.read(&paths),"codex":empty("app-server","loading"),"notice":"","schedule":{"status":"off"},"claudeSchedule":{"status":"off"}});
     publish(&state)?;
     let (tx, rx) = mpsc::channel();
     let input = tx.clone();

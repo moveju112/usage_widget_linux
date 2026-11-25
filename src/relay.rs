@@ -9,9 +9,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-mod pull;
 mod setup;
-pub use pull::{vm, watch};
 pub use setup::{install, receiver_key, uninstall};
 
 const ACK: &[u8] = b"ok\n";
@@ -41,12 +39,6 @@ pub fn account_tag(profile: &Value) -> Option<String> {
             Sha256::digest(format!("ai-usage-tray/claude/v1/{uuid}"))
         )
     })
-}
-fn valid_host(s: &str) -> bool {
-    !s.is_empty()
-        && !s.starts_with('-')
-        && s.bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"-._@:[]".contains(&c))
 }
 fn valid_tag(s: &str) -> bool {
     s.len() == 64
@@ -207,9 +199,9 @@ fn validate(packet: &Value, expected: &str) -> io::Result<()> {
     }
     Ok(())
 }
-// Keeps the newest packet for the account this PC shows, whether a VM pushed it or this PC pulled it.
-fn store(paths: &Paths, packet: &Value, expected: &str) -> io::Result<()> {
-    validate(packet, expected)?;
+pub fn receive(paths: &Paths, expected: &str) -> io::Result<()> {
+    let packet = read_input()?;
+    validate(&packet, expected)?;
     let dir = cache();
     fs::create_dir_all(&dir)?;
     let _lock = locked(&dir.join("receive.lock"))?;
@@ -225,11 +217,7 @@ fn store(paths: &Paths, packet: &Value, expected: &str) -> io::Result<()> {
     if !previous.is_some_and(|v| {
         v["account"] == expected && v["received"].as_f64() >= packet["received"].as_f64()
     }) {
-        atomic(&target, &serde_json::to_vec(packet)?, 0o600)?;
+        atomic(&target, &serde_json::to_vec(&packet)?, 0o600)?;
     }
-    Ok(())
-}
-pub fn receive(paths: &Paths, expected: &str) -> io::Result<()> {
-    store(paths, &read_input()?, expected)?;
     io::stdout().write_all(ACK)
 }

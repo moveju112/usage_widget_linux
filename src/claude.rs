@@ -82,7 +82,7 @@ pub fn capture(paths: &Paths, raw: &[u8], at: f64) -> io::Result<()> {
     }
     atomic(&target, &serde_json::to_vec(&sample)?, 0o600)
 }
-pub(crate) fn local(data: &Value, at: f64) -> Option<Value> {
+fn local(data: &Value, at: f64) -> Option<Value> {
     let entry = &data["cachedUsageUtilization"];
     let account = data["oauthAccount"]["accountUuid"].as_str()?;
     if account.is_empty() || entry["accountUuid"].as_str() != Some(account) {

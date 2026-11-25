@@ -22,7 +22,6 @@ const ASSETS: &[(&str, &[u8])] = &[
         "eventPrefs.js",
         include_bytes!("../extension/eventPrefs.js"),
     ),
-    ("vmPrefs.js", include_bytes!("../extension/vmPrefs.js")),
     ("prefs.js", include_bytes!("../extension/prefs.js")),
     ("settings.js", include_bytes!("../extension/settings.js")),
     (
@@ -384,7 +383,18 @@ fn install(dest: &Path, mut config: Option<Settings>) -> io::Result<bool> {
         }
         return Err(error);
     }
+    retire_pull(dest)?;
     Ok(fresh || changed || !backups.is_empty())
+}
+
+// 0.19.0 pulled VM usage over SSH. The feature is gone, so its window module and host list go too.
+fn retire_pull(dest: &Path) -> io::Result<()> {
+    remove_file(&dest.join("vmPrefs.js"))?;
+    let config = crate::schedule::config_dir();
+    remove_file(&config.join("claude-vm-hosts"))?;
+    remove_file(&config.join("claude-vm-hosts.lock"))?;
+    remove_file(&cache().join("claude-vm-status.json"))?;
+    remove_file(&cache().join("vm-status.lock"))
 }
 
 fn write_cli_hints(dest: &Path, candidate: &Path, config: &Settings) -> io::Result<()> {
@@ -506,6 +516,7 @@ fn start(dest: &Path) -> io::Result<()> {
 }
 fn uninstall(dest: &Path, mut config: Settings) -> io::Result<()> {
     let (changed, remove) = unwrap(&mut config.data, dest)?;
+    retire_pull(dest)?;
     if dest.exists() {
         if known()? {
             checked(

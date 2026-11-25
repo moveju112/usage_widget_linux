@@ -1,4 +1,4 @@
-import {inlineAmounts, present, percent, periodLabel, reading, vmState} from '../extension/display.js';
+import {inlineAmounts, present, percent, periodLabel, reading} from '../extension/display.js';
 function equal(actual, expected) {
     if (actual !== expected) throw Error(JSON.stringify({actual, expected}));
 }
@@ -42,15 +42,3 @@ equal(separate.status,'일부 오래된 기록');
 equal(reading(separate,300).text,'0%');
 equal(reading(separate,10080).text,'25%*');
 equal(reading(show([{...win(300,80,now), received: now}]),300).value,null);
-
-const vm = (status, received = null, checked = now) => ({status, received, checked, text: ''});
-equal(vmState(undefined, now).label, '확인 대기');
-equal(vmState(vm('ok', now - 1799), now).label, '갱신 중');
-equal(vmState(vm('ok', now - 1799), now).tone, 'success');
-equal(vmState(vm('ok', now - 1800), now).label, '오래된 기록');
-equal(vmState(vm('empty'), now).label, '기록 없음');
-equal(vmState(vm('no_account'), now).label, '로그인 안 됨');
-equal(vmState(vm('unreachable', now - 60), now).label, '접속 실패');
-equal(vmState(vm('unreachable'), now).tone, 'error');
-equal(vmState(vm('ok', now - 60, now - 181), now).label, '확인 멈춤');
-equal(vmState(vm('ok', now - 60, now - 180), now).label, '갱신 중');

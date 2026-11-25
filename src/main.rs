@@ -62,11 +62,6 @@ fn serve(paths: Arc<Paths>) -> io::Result<()> {
         });
         (stop, worker)
     });
-    let (wake, woken) = mpsc::channel();
-    let puller = {
-        let (paths, cancel) = (paths.clone(), cancel.clone());
-        thread::spawn(move || relay::watch(paths, cancel, woken))
-    };
     let mut job = None;
     let mut next_query = Instant::now();
     let mut next_local = next_query + Duration::from_secs(2);
@@ -85,9 +80,6 @@ fn serve(paths: Arc<Paths>) -> io::Result<()> {
         };
         let event = rx.recv_timeout(next.saturating_duration_since(Instant::now()));
         let manual = matches!(event, Ok(Event::Refresh));
-        if manual {
-            let _ = wake.send(());
-        }
         let mut changed = false;
         match event {
             Ok(Event::Closed) | Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
@@ -126,8 +118,6 @@ fn serve(paths: Arc<Paths>) -> io::Result<()> {
         }
     };
     cancel.store(true, Ordering::Relaxed);
-    drop(wake);
-    let _ = puller.join();
     for (stop, worker) in schedulers {
         drop(stop);
         let _ = worker.join();
@@ -146,9 +136,6 @@ fn run() -> io::Result<()> {
         "sender-flush" => relay::flush(),
         "receiver-key" => relay::receiver_key(),
         "receive" => relay::receive(&paths, &env::args().nth(2).unwrap_or_default()),
-        "vm-add" | "vm-remove" | "vm-test" | "vm-list" => {
-            relay::vm(&paths, &action, &env::args_os().skip(2).collect::<Vec<_>>())
-        }
         "sender" | "capture" | "forward" => {
             let sending = action == "sender";
             let mode = if sending {
@@ -188,7 +175,7 @@ fn run() -> io::Result<()> {
         "apply-update" => install::apply_update(&env::args().nth(2).unwrap_or_default()),
         "install" | "start" | "uninstall" => install::run(&action),
         _ => Err(io::Error::other(
-            "사용법: ai-usage-tray install | start | uninstall | check-update | update | once | serve | capture | forward | sender-install SSH_HOST KEY | sender-uninstall | receiver-key | vm-add SSH_HOST | vm-remove SSH_HOST | vm-test SSH_HOST | vm-list",
+            "사용법: ai-usage-tray install | start | uninstall | check-update | update | once | serve | capture | forward | sender-install SSH_HOST KEY | sender-uninstall | receiver-key",
         )),
     }
 }

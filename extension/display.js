@@ -57,16 +57,3 @@ export function inlineAmounts(view) {
     return panelPeriods.map(minutes => reading(view, minutes).value)
         .filter(value => value !== null).map(percent);
 }
-
-// How one VM's last SSH read looks in the settings window. entry comes from claude-vm-status.json.
-export function vmState(entry, now) {
-    if (!entry) return {label: '확인 대기', tone: 'pending'};
-    // The tray checks every minute, so a much older check means nothing is reading this VM.
-    if (now - entry.checked > 180) return {label: '확인 멈춤', tone: 'warning'};
-    if (entry.status === 'unreachable') return {label: '접속 실패', tone: 'error'};
-    if (entry.status === 'ok')
-        return now - entry.received < 1800 ? {label: '갱신 중', tone: 'success'} : {label: '오래된 기록', tone: 'warning'};
-    const labels = {empty: '기록 없음', none: '프로필 없음', no_account: '로그인 안 됨',
-        rejected: '표시 안 함', invalid: '읽기 실패'};
-    return {label: labels[entry.status] ?? '확인 실패', tone: 'warning'};
-}

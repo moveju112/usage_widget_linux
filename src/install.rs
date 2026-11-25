@@ -18,6 +18,10 @@ const ASSETS: &[(&str, &[u8])] = &[
         "schedulePrefs.js",
         include_bytes!("../extension/schedulePrefs.js"),
     ),
+    (
+        "eventPrefs.js",
+        include_bytes!("../extension/eventPrefs.js"),
+    ),
     ("prefs.js", include_bytes!("../extension/prefs.js")),
     ("settings.js", include_bytes!("../extension/settings.js")),
     (
@@ -538,6 +542,7 @@ fn uninstall(dest: &Path, mut config: Settings) -> io::Result<()> {
         let _ = fs::remove_dir(state);
     }
     let config = crate::schedule::config_dir();
+    remove_file(&config.join(crate::claude::events::SETTING))?;
     let state = crate::schedule::state_dir();
     for provider in crate::schedule::Provider::ALL {
         remove_file(&config.join(provider.config_file()))?;

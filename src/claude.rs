@@ -1,3 +1,4 @@
+pub(crate) mod events;
 use crate::{cli, common::*, schedule::Call};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -59,13 +60,25 @@ pub fn capture(paths: &Paths, raw: &[u8], at: f64) -> io::Result<()> {
     sample["observed"] = json!(at);
     if let Some(previous) = json_file(&target)
         && previous["profile"] == sample["profile"]
-        && (previous["observed"].as_f64().is_some_and(|t| t > at)
+    {
+        if previous["observed"].as_f64().is_some_and(|t| t > at)
             || (status == "waiting"
                 && previous["windows"]
                     .as_array()
-                    .is_some_and(|v| !v.is_empty())))
-    {
-        return Ok(());
+                    .is_some_and(|v| !v.is_empty()))
+        {
+            return Ok(());
+        }
+        if status == "ok"
+            && let Some(old) = from_hook(
+                &previous,
+                sample["profile"].as_str().unwrap_or_default(),
+                at,
+            )
+            && let Some(mut merged) = merge_windows([&sample, &old])
+        {
+            sample["windows"] = merged["windows"].take();
+        }
     }
     atomic(&target, &serde_json::to_vec(&sample)?, 0o600)
 }
@@ -90,7 +103,10 @@ fn from_hook(data: &Value, profile: &str, at: f64) -> Option<Value> {
         .as_array()?
         .iter()
         .filter_map(|item| {
-            let w = window(&item["minutes"], &item["percent"], &item["resets"])?;
+            let mut w = window(&item["minutes"], &item["percent"], &item["resets"])?;
+            if let Some(t) = timestamp(&item["received"]).filter(|t| *t > 0.0 && *t <= at + 5.0) {
+                w["received"] = json!(t);
+            }
             matches!(w["minutes"].as_u64(), Some(300 | 10080)).then_some(w)
         })
         .collect();
@@ -109,6 +125,43 @@ fn from_hook(data: &Value, profile: &str, at: f64) -> Option<Value> {
     sample["observed"] = json!(timestamp(&data["observed"]));
     Some(sample)
 }
+// Inputs first in the list win ties. Every window keeps its own observation time.
+fn merge_windows<'a>(sources: impl IntoIterator<Item = &'a Value>) -> Option<Value> {
+    let mut selected = std::collections::BTreeMap::new();
+    for source in sources {
+        for w in source["windows"].as_array().into_iter().flatten() {
+            let Some(minutes @ (300 | 10080)) = w["minutes"].as_u64() else {
+                continue;
+            };
+            let Some(at) = w["received"]
+                .as_f64()
+                .or_else(|| source["received"].as_f64())
+            else {
+                continue;
+            };
+            if selected
+                .get(&minutes)
+                .is_some_and(|(previous, _, _)| *previous >= at)
+            {
+                continue;
+            }
+            let mut row = w.clone();
+            row["received"] = json!(at);
+            selected.insert(
+                minutes,
+                (at, source["source"].as_str().unwrap_or("Claude Code"), row),
+            );
+        }
+    }
+    let &(at, source, _) = selected.values().max_by(|a, b| a.0.total_cmp(&b.0))?;
+    Some(snapshot(
+        source,
+        selected.into_values().map(|(_, _, row)| row).collect(),
+        Some(at),
+        "ok",
+    ))
+}
+
 pub(crate) type Signature = (u64, u64, i64, i64, u64);
 pub(crate) fn signature(path: &Path) -> Option<Signature> {
     let m = fs::metadata(path).ok()?;
@@ -120,6 +173,8 @@ pub struct Reader {
     hook_version: Option<(String, Option<Signature>)>,
     identity: String,
     account: Option<String>,
+    event_account: Option<String>,
+    events: events::FileSource,
     remote_version: Option<Signature>,
     remote: Option<Value>,
     local: Option<Value>,
@@ -134,6 +189,7 @@ impl Reader {
             let data = json_file(&profile).unwrap_or_default();
             self.identity = scope(&profile, &data);
             self.account = crate::relay::account_tag(&data);
+            self.event_account = events::account_id(&data);
             self.local = local(&data, at);
             self.profile_version = Some(version);
         }
@@ -143,7 +199,8 @@ impl Reader {
             self.remote = json_file(&remote_path);
             self.remote_version = version;
         }
-        let local = if paths.find_cli("claude").is_some() {
+        let has_cli = paths.find_cli("claude").is_some();
+        let local = if has_cli {
             self.local_read(at)
         } else {
             empty("Claude Code", "missing")
@@ -153,17 +210,28 @@ impl Reader {
                 .as_ref()
                 .is_none_or(|id| v["account"].as_str() == Some(id))
         });
-        if let Some(remote) = remote
-            && (self.account.is_none() || remote["received"].as_f64() > local["received"].as_f64())
-        {
-            return snapshot(
+        let remote = remote.map(|r| {
+            snapshot(
                 "SSH",
-                remote["windows"].as_array().cloned().unwrap_or_default(),
-                remote["received"].as_f64(),
+                r["windows"].as_array().cloned().unwrap_or_default(),
+                r["received"].as_f64(),
                 "ok",
-            );
+            )
+        });
+        if self.account.is_none()
+            && let Some(remote) = remote
+        {
+            return merge_windows([&remote]).unwrap_or(remote);
         }
-        local
+        let file = self
+            .events
+            .read(self.event_account.as_deref(), !has_cli, at);
+        merge_windows(
+            [Some(&local), remote.as_ref(), file.as_ref()]
+                .into_iter()
+                .flatten(),
+        )
+        .unwrap_or(local)
     }
 
     fn local_read(&mut self, at: f64) -> Value {
@@ -173,23 +241,13 @@ impl Reader {
             self.hook = json_file(&hook).and_then(|d| from_hook(&d, &self.identity, at));
             self.hook_version = Some(version);
         }
-        let local_time = self
-            .local
-            .as_ref()
-            .and_then(|v| v["received"].as_f64())
-            .unwrap_or_default();
-        if let Some(h) = &self.hook {
-            let t = if h["status"] == "unavailable" {
-                &h["observed"]
-            } else {
-                &h["received"]
-            };
-            if t.as_f64().unwrap_or_default() >= local_time {
-                return h.clone();
-            }
+        if let Some(h) = &self.hook
+            && h["status"] == "unavailable"
+            && h["observed"].as_f64() >= self.local.as_ref().and_then(|v| v["received"].as_f64())
+        {
+            return h.clone();
         }
-        self.local
-            .clone()
+        merge_windows(self.hook.iter().chain(self.local.iter()))
             .unwrap_or_else(|| empty("Claude Code", "waiting"))
     }
 }

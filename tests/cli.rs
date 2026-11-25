@@ -1211,3 +1211,148 @@ fn headless_and_desktop_hooks_can_be_removed_in_either_order() {
         }
     }
 }
+
+#[test]
+fn event_file_and_cli_choose_each_period_independently() {
+    use sha2::{Digest, Sha256};
+    let u = User::new();
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 10;
+    let account = format!("{:x}", Sha256::digest(b"claude-account-v1/test-user"));
+    let profile = json!({"oauthAccount":{"accountUuid":"test-user"},
+        "cachedUsageUtilization":{"accountUuid":"test-user","fetchedAtMs":at*1000,
+        "utilization":{"five_hour":{"utilization":12}, "seven_day":{"utilization":30}}}});
+    fs::write(u.path("home/.claude.json"), profile.to_string()).unwrap();
+    let setting = u.path("home/.config/ai-usage-tray/claude-events-path");
+    fs::create_dir_all(setting.parent().unwrap()).unwrap();
+    let dir = u.path("custom folder");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(&setting, dir.to_str().unwrap()).unwrap();
+    let file = dir.join("claude.json");
+    let mut data = json!({"version":1,"account":account,"windows":{
+        "five_hour":{"used_percent":0,"received_at":at+1,"resets_at":null},
+        "seven_day":{"used_percent":99,"received_at":at-1,"resets_at":null}}});
+    fs::write(&file, data.to_string()).unwrap();
+    let state = || u.state()["claude"].clone();
+    let mixed = state();
+    assert_eq!(mixed["windows"][0]["percent"], 0);
+    assert_eq!(mixed["windows"][1]["percent"], 30);
+    assert_eq!(mixed["windows"][1]["received"].as_f64(), Some(at as f64));
+    assert_eq!(state(), mixed);
+    data["windows"]["seven_day"]["received_at"] = json!(at + 2);
+    let renamed = dir.join("custom.json");
+    fs::write(&renamed, data.to_string()).unwrap();
+    fs::write(&setting, renamed.to_str().unwrap()).unwrap();
+    assert_eq!(state()["windows"][1]["percent"], 99);
+    u.capture(br#"{"rate_limits":{"five_hour":{"used_percentage":7}}}"#);
+    let newer = state();
+    assert_eq!(newer["windows"][0]["percent"], 7);
+    assert_eq!(newer["windows"][1]["percent"], 99);
+    u.capture(br#"{"rate_limits":{"seven_day":{"used_percentage":40}}}"#);
+    let partial = state();
+    assert_eq!(partial["windows"][0], newer["windows"][0]);
+    assert_eq!(partial["windows"][1]["percent"], 40);
+    fs::remove_file(u.path("cache/ai-usage-tray/claude.json")).unwrap();
+    for invalid in [
+        json!({"version":2,"account":account,"windows":data["windows"]}),
+        json!({"version":1,"account":"another","windows":data["windows"]}),
+        json!({"version":1,"account":account,"windows":{"five_hour":{"received_at":at+999,"used_percent":1}}}),
+        json!({"version":1,"account":account,"windows":{"seven_day":{"received_at":at+2,"used_percent":101}}}),
+    ] {
+        fs::write(&renamed, invalid.to_string()).unwrap();
+        assert_eq!(state()["windows"][0]["percent"], 12);
+        assert_eq!(state()["windows"][1]["percent"], 30);
+    }
+    fs::write(&renamed, "{").unwrap();
+    assert_eq!(state()["windows"][1]["percent"], 30);
+    fs::write(&renamed, data.to_string()).unwrap();
+    fs::write(&setting, "").unwrap();
+    assert_eq!(state()["windows"][0]["percent"], 12);
+    assert_eq!(load(&renamed), data);
+}
+
+#[test]
+fn running_tray_reads_path_changes_and_atomic_replacements() {
+    let u = User::new();
+    use sha2::{Digest, Sha256};
+    let account = format!("{:x}", Sha256::digest(b"claude-account-v1/worker"));
+    fs::write(
+        u.path("home/.claude.json"),
+        br#"{"oauthAccount":{"accountUuid":"worker"}}"#,
+    )
+    .unwrap();
+    let folder = u.path("after startup");
+    let cfg = u.path("home/.config/ai-usage-tray/claude-events-path");
+    fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    let mut worker = u
+        .command(BIN)
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = mpsc::channel();
+    let stdout = worker.stdout.take().unwrap();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx
+                .send(serde_json::from_str::<Value>(&line).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let wait = |wanted: Option<u64>| {
+        let limit = Instant::now() + Duration::from_secs(8);
+        loop {
+            let v = rx
+                .recv_timeout(limit.saturating_duration_since(Instant::now()))
+                .unwrap();
+            let c = &v["claude"];
+            if c["windows"]
+                .as_array()
+                .unwrap()
+                .first()
+                .and_then(|x| x["percent"].as_u64())
+                == wanted
+            {
+                break;
+            }
+        }
+    };
+    let write = |path: &Path, percent: u8| {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        fs::write(
+            path,
+            json!({"version":1, "account":account, "windows":{
+            "seven_day":{"used_percent":percent, "received_at":now, "resets_at":null}}})
+            .to_string(),
+        )
+        .unwrap();
+    };
+    wait(None);
+    fs::write(&cfg, folder.to_str().unwrap()).unwrap();
+    fs::create_dir(&folder).unwrap();
+    let file = folder.join("claude.json");
+    write(&file, 25);
+    wait(Some(25));
+    let other = u.path("custom.json");
+    write(&other, 0);
+    fs::write(&cfg, other.to_str().unwrap()).unwrap();
+    wait(Some(0));
+    let tmp = u.path("replacement");
+    write(&tmp, 18);
+    fs::rename(tmp, &other).unwrap();
+    wait(Some(18));
+    fs::write(&cfg, "\n").unwrap();
+    wait(None);
+    drop(worker.stdin.take());
+    assert!(worker.wait().unwrap().success());
+}

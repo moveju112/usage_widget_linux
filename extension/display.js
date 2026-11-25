@@ -19,20 +19,20 @@ export function percent(value) {
 export function present(data, now, service) {
     const state = data ?? {status: 'loading', windows: []};
     const windows = (state.windows ?? []).map(w => ({
-        ...w, expired: w.resets != null && w.resets <= now,
+        ...w, stale: now - (w.received ?? state.received ?? now) >= 1800, expired: w.resets != null && w.resets <= now,
     }));
     const valid = windows.filter(w => !w.expired);
     const main = valid.find(w => w.minutes === 300) ?? valid.find(w => w.minutes === 10080) ?? valid[0];
-    const stale = Boolean(state.received && now - state.received >= 1800 && valid.length);
+    const stale = valid.some(w => w.stale);
     let status = statuses[state.status] ?? '정상';
     if (state.status === 'ok') {
         if (!valid.length) status = windows.length ? '초기화 후 새 값 대기' : '한도 정보 미제공';
-        else if (stale) status = '오래된 기록';
+        else if (stale) status = valid.every(w => w.stale) ? '오래된 기록' : '일부 오래된 기록';
     }
     let value = '—';
     if (main) {
         const qualifier = main.minutes === 300 ? '' : duration(main.minutes) + ' ';
-        value = qualifier + percent(main.percent) + (stale ? '*' : '');
+        value = qualifier + percent(main.percent) + (main.stale ? '*' : '');
     }
     return {name: service, windows, main, value, status, stale, received: state.received,
         source: state.source, normal: status === '정상'};
@@ -49,8 +49,8 @@ export function periodLabel(minutes) {
 export function reading(view, minutes) {
     const w = view.windows.find(row => row.minutes === minutes);
     const value = w && !w.expired ? w.percent : null;
-    const text = value === null ? '—' : percent(value) + (view.stale ? '*' : '');
-    return {value, text, resets: w?.resets, expired: w?.expired ?? false};
+    const text = value === null ? '—' : percent(value) + (w.stale ? '*' : '');
+    return {value, text, stale: w?.stale ?? false, resets: w?.resets, expired: w?.expired ?? false};
 }
 
 export function inlineAmounts(view) {

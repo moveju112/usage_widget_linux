@@ -37,3 +37,8 @@ equal(inlineAmounts(show([win(300,5),win(10080,19)],now-1800)).join(' / '), '5% 
 equal(inlineAmounts(show([win(10080,88,now)])).length, 0);
 equal(inlineAmounts(present({status:'waiting'},now,'Claude')).length, 0);
 print('표시 상태 검증 통과');
+const separate = show([{...win(300,0), received: now}, {...win(10080,25), received: now-1800}]);
+equal(separate.status,'일부 오래된 기록');
+equal(reading(separate,300).text,'0%');
+equal(reading(separate,10080).text,'25%*');
+equal(reading(show([{...win(300,80,now), received: now}]),300).value,null);

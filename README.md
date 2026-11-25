@@ -100,6 +100,7 @@ Usage whose reset time has passed is hidden. An unknown reset time is shown as `
 Times follow the OS local time zone.
 
 - Claude: only the 5-hour and 7-day limits that the CLI reports while you use Claude Code are read. Your existing status line output is preserved, and no request is sent just to check usage. If a refresh finds nothing new, the menu shows `다음 Claude Code 응답 대기` (waiting for the next Claude Code response).
+- Grove: under **트레이 설정 → Claude 사용량 → 이벤트 파일 또는 폴더 경로** (Tray settings → Claude usage → Event file or folder path), point to `usage/v1/claude.json` inside the Grove data folder, or to the folder that contains it. Enter a file path and apply it, or pick a folder. The collector checks for changes every 2 seconds. For the same account it takes, separately for the 5-hour and 7-day periods, whichever of the CLI and the event file was actually received most recently. Re-reading the file, or an update to only one period, leaves the other period's received time unchanged. Clear the path and apply to disconnect.
 - Codex: the logged-in CLI is queried for limits at startup, every 120 seconds, and on refresh. No model is called.
 - Only usage percentages, reset times, and received times are stored, in `~/.cache/ai-usage-tray`. Conversations, raw input, and auth tokens are never recorded.
 

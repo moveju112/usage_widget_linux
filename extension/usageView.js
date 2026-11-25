@@ -97,13 +97,13 @@ function stackedReadings(view, vertical, thickness) {
     const grid = new St.Widget({layout_manager: layout, style_class: 'aut-stacked',
         style: 'font-size: ' + fontSize + 'px;', y_align: center});
     for (const [row, minutes] of panelPeriods.entries()) {
-        const {value} = reading(view, minutes);
+        const {value, stale} = reading(view, minutes);
         layout.attach(label(minutes === 300 ? 'H' : 'W', 'aut-stack-period'), 0, row, 1, 1);
         const amount = label(value === null ? '—' : percent(value), 'aut-amount');
         amount.x_expand = true;
         amount.x_align = Clutter.ActorAlign.END;
         layout.attach(new St.Bin({style_class: 'aut-stack-value', child: amount}), 1, row, 1, 1);
-        layout.attach(label(view.stale && value !== null ? '*' : '', 'aut-stack-marker'), 2, row, 1, 1);
+        layout.attach(label(stale && value !== null ? '*' : '', 'aut-stack-marker'), 2, row, 1, 1);
     }
     return grid;
 }
@@ -196,14 +196,14 @@ export function usageMeters(views, services, icons, narrow, contentWidth) {
         const notes = [];
         const periods = new Set([...panelPeriods, ...view.windows.map(w => w.minutes)]);
         for (const minutes of periods) {
-            const {value, resets, expired} = reading(view, minutes);
+            const {value, text, resets, expired} = reading(view, minutes);
             if (value === null) {
                 if (view.windows.length)
                     notes.push(periodLabel(minutes) + (expired ? ' 초기화 후 새 값 대기' : ' 한도 미제공'));
                 continue;
             }
             layout.attach(label(periodLabel(minutes), 'aut-meter-period'), 0, row, 1, 1);
-            layout.attach(label(percent(value), 'aut-meter-number'), 1, row, 1, 1);
+            layout.attach(label(text, 'aut-meter-number'), 1, row, 1, 1);
             layout.attach(meter(value, key), 2, row, 1, 1);
             const reset = label(resets == null ? '초기화 —' : localTime(resets) + ' 초기화', 'aut-meta aut-meter-reset');
             reset.x_expand = false;

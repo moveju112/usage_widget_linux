@@ -11,6 +11,15 @@ Supported GNOME Shell versions are 46 and 50. Versions 47–49 are not on the su
 
 The interface is in Korean. This README quotes each label as it appears on screen, followed by its meaning.
 
+## Choose your setup
+
+The main PC is the one whose panel shows the usage.
+
+| Where you use Claude Code | What to set up |
+|---|---|
+| Only on this PC | [Install and run](#install-and-run). Nothing else is needed. |
+| Also on other VMs or servers | [Install and run](#install-and-run) on the main PC, then add a sender on each VM: [Receiving Claude usage from other VMs](#receiving-claude-usage-from-other-vms). |
+
 ## Install and run
 
 Check your version with `gnome-shell --version`.
@@ -38,6 +47,45 @@ Click the panel item to see usage. In the menu's top-right corner, the circular 
 | 3안 · 이중 링형 (Double ring, default) | The outer ring is 5-hour, the inner ring is 7-day. A dashed ring means no value, an empty solid ring means a real 0%, and a clock badge means a stale record. |
 
 The detail menu lists each service's usage, received and reset times, and collection status. Under **상세 메뉴 모양** you can pick a list, per-service gauges, or a side-by-side comparison. Accounts with only a weekly limit show the 7-day value alone.
+
+## Receiving Claude usage from other VMs
+
+The main PC and every VM need `0.13.0` or later. Install the widget on the main PC, and install only the sender on each VM, using the same binary. A VM does not need GNOME. It needs an OpenSSH client and a systemd user session, and the main PC needs an SSH server the VMs can reach.
+
+1. **On each VM**, log in to Claude Code with your subscription account. Verify the SSH host key of the target and add it to `known_hosts`. Replace `user@main-pc` below with the main PC's SSH account and address, or an alias from `~/.ssh/config`. Create one dedicated key per VM. If a key with the same name already exists, check what it is for before overwriting it.
+
+   ```bash
+   curl -fL -o ai-usage-tray "https://github.com/moveju112/usage_widget_linux/releases/latest/download/ai-usage-tray-linux-$(uname -m)"
+   chmod u+x ai-usage-tray
+   install -d -m 700 ~/.ssh
+   ssh-keygen -t ed25519 -N '' -f ~/.ssh/ai-usage-tray
+   ./ai-usage-tray sender-install user@main-pc ~/.ssh/ai-usage-tray > vm-pair.json
+   ```
+
+   **If the main PC's SSH server does not listen on port 22**, `user@main-pc` alone cannot reach it. Add an alias with the port to `~/.ssh/config` on the VM, then pass the alias (`main-pc` below) to `sender-install` instead.
+
+   ```
+   Host main-pc
+       HostName 192.168.0.10
+       User ubuntu
+       Port 49222
+   ```
+
+2. Copy only `vm-pair.json` to the **main PC**. It holds the public key and a hash that identifies the account. If you trust that VM, run the commands below once. The SSH entry they create allows nothing but the command that receives usage for that account. The private key stays on the VM.
+
+   ```bash
+   tray="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/ai-usage-tray@local/ai-usage-tray"
+   install -d -m 700 ~/.ssh
+   (umask 077; "$tray" receiver-key < vm-pair.json >> ~/.ssh/authorized_keys)
+   ```
+
+3. **Use Claude Code on the VM as usual.** Your existing status line output is preserved. If nothing shows up, reopen Claude Code.
+
+The tray shows the most recent value among the local and VM records of the same Claude account. You do not need to use the Claude CLI on the main PC. **Keep the VM clocks in sync.** A record more than 5 seconds ahead of the main PC's clock is rejected.
+
+A VM sends over SSH only when Claude reports a new value, and no process stays running while it waits. If the connection is down it keeps the latest record and retries every 5 minutes. Check the waiting state with `systemctl --user status ai-usage-tray-sender.path` and send failures with `journalctl --user -u ai-usage-tray-sender.service`.
+
+To **disconnect**, run `./ai-usage-tray sender-uninstall` on the VM and remove only that VM's public-key line from `~/.ssh/authorized_keys` on the main PC. The sender restores your original status line and leaves the dedicated key files in place.
 
 ## Reading the values
 
@@ -92,34 +140,6 @@ tray="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/ai-usage-tray@
 ```
 
 Updating requires the system `curl`. The download is checked against the size and SHA-256 that GitHub provides before it is installed, and your settings are kept.
-
-## Receiving Claude usage from other VMs
-
-The main PC and every VM need `0.13.0` or later. Install the widget on the main PC, and install only the sender on each VM, using the same binary. A VM does not need GNOME. It needs an OpenSSH client and a systemd user session, and the main PC needs an SSH server the VMs can reach.
-
-1. **On each VM**, log in to Claude Code with your subscription account. Verify the SSH host key of the target and add it to `known_hosts`. Replace `user@main-pc` below with the main PC's SSH account and address, or an alias from `~/.ssh/config`. Create one dedicated key per VM. If a key with the same name already exists, check what it is for before overwriting it.
-
-   ```bash
-   install -d -m 700 ~/.ssh
-   ssh-keygen -t ed25519 -N '' -f ~/.ssh/ai-usage-tray
-   ./ai-usage-tray sender-install user@main-pc ~/.ssh/ai-usage-tray > vm-pair.json
-   ```
-
-2. Copy only `vm-pair.json` to the **main PC**. It holds the public key and a hash that identifies the account. If you trust that VM, run the commands below once. The SSH entry they create allows nothing but the command that receives usage for that account. The private key stays on the VM.
-
-   ```bash
-   tray="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/ai-usage-tray@local/ai-usage-tray"
-   install -d -m 700 ~/.ssh
-   (umask 077; "$tray" receiver-key < vm-pair.json >> ~/.ssh/authorized_keys)
-   ```
-
-3. **Use Claude Code on the VM as usual.** Your existing status line output is preserved. If nothing shows up, reopen Claude Code.
-
-The tray shows the most recent value among the local and VM records of the same Claude account. You do not need to use the Claude CLI on the main PC. **Keep the VM clocks in sync.** A record more than 5 seconds ahead of the main PC's clock is rejected.
-
-A VM sends over SSH only when Claude reports a new value, and no process stays running while it waits. If the connection is down it keeps the latest record and retries every 5 minutes. Check the waiting state with `systemctl --user status ai-usage-tray-sender.path` and send failures with `journalctl --user -u ai-usage-tray-sender.service`.
-
-To **disconnect**, run `./ai-usage-tray sender-uninstall` on the VM and remove only that VM's public-key line from `~/.ssh/authorized_keys` on the main PC. The sender restores your original status line and leaves the dedicated key files in place.
 
 ## Uninstall
 

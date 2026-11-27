@@ -57,12 +57,20 @@ export function addSchedulePreferences(page, name, filename) {
     const showFollowUp = () => { followUp.visible = count.value > 1; };
     showFollowUp();
     const hint = '같은 시각을 입력하면 해당 분에 실행해. 종료가 더 이르면 다음 날까지야.';
-    const action = new Adw.ActionRow({title: '예약 저장', subtitle: loadError ? '기존 예약을 읽을 수 없어.' : hint});
-    const save = new Gtk.Button({label: '저장', valign: Gtk.Align.CENTER, sensitive: !loadError});
-    action.add_suffix(save);
-    group.add(action);
+    const status = new Gtk.Label({wrap: true, justify: Gtk.Justification.CENTER, css_classes: ['caption']});
+    const setStatus = (text, error = false) => {
+        status.label = text;
+        status.css_classes = ['caption', error ? 'error' : 'dim-label'];
+    };
+    setStatus(loadError ? '기존 예약을 읽을 수 없어.' : hint, loadError);
+    const save = new Gtk.Button({label: '저장', halign: Gtk.Align.CENTER, sensitive: !loadError,
+        css_classes: ['suggested-action', 'pill']});
+    const footer = new Gtk.Box({orientation: Gtk.Orientation.VERTICAL, spacing: 12,
+        margin_top: 12, margin_bottom: 18, margin_start: 18, margin_end: 18});
+    footer.append(status);
+    footer.append(save);
     const modified = () => {
-        action.subtitle = hint;
+        setStatus(hint);
         save.sensitive = true;
     };
     for (const entry of entries) entry.connect('changed', modified);
@@ -100,12 +108,12 @@ export function addSchedulePreferences(page, name, filename) {
         }
         const baseModel = name === 'Claude' ? next.model.replace(/\[1m\]$/, '') : next.model;
         if (next.enabled && next.model && (!modelPattern.test(baseModel) || next.model.length > 128)) {
-            action.subtitle = 'CLI에서 사용할 모델 ID를 입력해.';
+            setStatus('CLI에서 사용할 모델 ID를 입력해.', true);
             model.grab_focus();
             return;
         }
         if (next.enabled && (!timePattern.test(next.start) || !timePattern.test(next.end))) {
-            action.subtitle = '시각은 00:00부터 23:59 사이의 HH:MM으로 입력해.';
+            setStatus('시각은 00:00부터 23:59 사이의 HH:MM으로 입력해.', true);
             (!timePattern.test(next.start) ? start : end).grab_focus();
             return;
         }
@@ -118,11 +126,12 @@ export function addSchedulePreferences(page, name, filename) {
             etag = nextEtag;
             current = next;
             enabled.subtitle = '';
-            action.subtitle = next.enabled ? '저장했어. 트레이 설정에서 다음 예정 시각을 확인해.' : '예약을 껐어.';
+            setStatus(next.enabled ? '저장했어. 트레이 설정에서 다음 예정 시각을 확인해.' : '예약을 껐어.');
             save.sensitive = false;
         } catch (e) {
-            action.subtitle = e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.WRONG_ETAG)
-                ? '다른 창에서 예약이 바뀌었어. 설정을 다시 열어줘.' : '예약 파일을 저장할 수 없어.';
+            setStatus(e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.WRONG_ETAG)
+                ? '다른 창에서 예약이 바뀌었어. 설정을 다시 열어줘.' : '예약 파일을 저장할 수 없어.', true);
         }
     });
+    return footer;
 }
